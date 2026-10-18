@@ -5123,3 +5123,45 @@ input, textarea, select{
 .user-look-radius .minimap{ border-radius:var(--look-radius) !important; }
 .user-look-radius .toast{ border-radius:var(--look-radius) !important; }
 .user-look-radius .search-wrap{ border-radius:var(--look-radius) !important; }
+
+/* ============================================================
+   Self-hosted sign-in + admin (no git host, no OAuth).
+   `.server-mode` on #loginOverlay hides every cloud-only control so the card
+   shows just the username/password pane.
+   ============================================================ */
+.login-overlay.server-mode .forge-tabs,
+.login-overlay.server-mode .forge-pane,
+.login-overlay.server-mode .login-extra,
+.login-overlay.server-mode .login-cloud-intro,
+.login-overlay.server-mode .login-signup{ display:none !important; }
+.server-login{ display:flex; flex-direction:column; }
+.server-login .instance-input{ width:100%; }
+.server-login .oauth-btn{ margin-top:18px; }
+.server-login .login-error{ min-height:18px; }
+
+/* Admin: user management modal */
+.modal-overlay{
+  position:fixed; inset:0; z-index:6000;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(20,16,12,.45); padding:20px; box-sizing:border-box;
+}
+.modal-card{
+  background:var(--node-bg,#fff); color:var(--ink);
+  border-radius:16px; border:1px solid var(--chrome-edge);
+  box-shadow:0 22px 70px rgba(0,0,0,.3), 0 1px 3px rgba(0,0,0,.06);
+  width:480px; max-width:92vw; max-height:100%; overflow-y:auto;
+  padding:22px 24px;
+}
+.modal-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+.modal-head h2{ font-family:var(--serif); font-weight:700; font-size:20px; margin:0; }
+.admin-list{ border:1px solid var(--chrome-edge); border-radius:10px; overflow:hidden; margin-bottom:18px; }
+.admin-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; font-size:14px; }
+.admin-row + .admin-row{ border-top:1px solid var(--chrome-edge); }
+.admin-who{ color:var(--ink); }
+.admin-role-badge{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; padding:2px 8px; border-radius:999px; background:var(--paper-2); color:var(--ink-soft); }
+.admin-add h3{ font-size:14px; margin:0 0 8px; color:var(--ink); }
+.admin-add .instance-input{ width:100%; margin-bottom:8px; }
+.admin-role{ display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-soft); margin:4px 0 14px; }
+.admin-add .oauth-btn{ width:100%; }
+.admin-add .login-error{ min-height:18px; }
+

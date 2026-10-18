@@ -206,7 +206,19 @@
     </div>
     <div class="login-share-note" id="loginShareNote" style="display:none"></div>
     <h2>Sign in</h2>
-    <p>Your mind maps are saved as private JSON files in a repository called <code>mindspark-maps</code> on your own account. This app talks to your git host directly - there's no server in between.</p>
+    <p class="login-cloud-intro">Your mind maps are saved as private JSON files in a repository called <code>mindspark-maps</code> on your own account. This app talks to your git host directly - there's no server in between.</p>
+
+    <!-- Self-hosted (SQLite) sign-in. Shown instead of the git-host panes when
+         the server answers /healthz, and the only way in: every map is owned by
+         the signed-in account and invisible to the others. -->
+    <div class="server-login" id="serverLoginPane" hidden>
+      <label class="pane-label" for="serverUser">Username</label>
+      <input type="text" id="serverUser" class="instance-input" autocomplete="username" spellcheck="false" autocapitalize="none" />
+      <label class="pane-label" for="serverPass">Password</label>
+      <input type="password" id="serverPass" class="instance-input" autocomplete="current-password" />
+      <button id="serverSignIn" class="oauth-btn" type="button">Sign in</button>
+      <div class="login-error" id="serverError"></div>
+    </div>
 
     <div class="forge-tabs" role="tablist" aria-label="Choose your git host">
       <button class="forge-tab is-on" type="button" role="tab" data-forge="github" aria-selected="true">GitHub</button>
@@ -450,6 +462,25 @@
       <p>Every save commits a small JSON file to your <code>mindspark-maps</code> repo, so your data is versioned and you can <code>git clone</code> it any time. (On Gitea, Forgejo and GitLab - and with a GitHub classic token - MindSpark creates that repo on first sign-in. A GitHub fine-grained token can't create repositories, which is why its step 1 exists.)</p>
       <p>To revoke access on GitHub: <a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener">fine-grained tokens</a> / <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">classic tokens</a>. On Gitea or Forgejo: <b>Settings → Applications</b> on your instance. On GitLab: <b>Preferences → Access tokens</b> (and <b>Applications</b> for an OAuth sign-in).</p>
     </details>
+  </div>
+</div>
+
+<!-- Admin: user management. Self-hosted only, administrators only. -->
+<div class="modal-overlay" id="adminOverlay" style="display:none">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>Users</h2>
+      <button class="tb" id="adminClose" title="Close" aria-label="Close">✕</button>
+    </div>
+    <div class="admin-list" id="adminList"></div>
+    <div class="admin-add">
+      <h3>Add a user</h3>
+      <input type="text" id="adminNewUser" class="instance-input" placeholder="username" autocomplete="off" spellcheck="false" autocapitalize="none" />
+      <input type="password" id="adminNewPass" class="instance-input" placeholder="password (at least 8 characters)" autocomplete="new-password" />
+      <label class="admin-role"><input type="checkbox" id="adminNewAdmin" /> Make this user an administrator</label>
+      <button id="adminAddBtn" class="oauth-btn" type="button">Add user</button>
+      <div class="login-error" id="adminError"></div>
+    </div>
   </div>
 </div>
 

@@ -1,0 +1,32 @@
+services:
+  mindspark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mindspark:local
+    container_name: mindspark
+    # ADMIN_USER / ADMIN_PASSWORD / SESSION_TTL_DAYS live here (see .env.example).
+    env_file:
+      - .env
+    ports:
+      # Host port is configurable via HOST_PORT in .env (default 3000); the
+      # container always listens on 3000 internally.
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      # Host ./data is bind-mounted and must be writable by the image's `node`
+      # user (uid 1000). Docker Desktop remaps this on Windows/macOS; on Linux
+      # create the folder as your own user or use a named volume instead.
+      - ./data:/app/data
+    environment:
+      # The administrator account. ADMIN_PASSWORD is required - Compose aborts
+      # with a clear message if it is missing rather than booting an open server.
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env (and ADMIN_USER if not "admin")}
+      - SESSION_TTL_DAYS=${SESSION_TTL_DAYS:-30}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

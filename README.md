@@ -1,6 +1,6 @@
 # MindSpark
 
-MindSpark is an open-source **mind-mapping app you actually own** - no accounts, no paywalls, no feature gates, no usage limits. Self-host it in one command, run it free in the browser with every map saved to your *own* private GitHub repo, or add one small Cloudflare Worker to unlock real-time sharing and collaboration. It's vanilla JavaScript with **zero runtime dependencies**, MIT-licensed, AI-assisted, and yours to run, modify, and extend.
+MindSpark is an open-source **mind-mapping app you actually own** - no vendor account, no paywalls, no feature gates, no usage limits. Self-host it in one command, run it free in the browser with every map saved to your *own* private GitHub repo, or add one small Cloudflare Worker to unlock real-time sharing and collaboration. It's vanilla JavaScript with **zero runtime dependencies**, MIT-licensed, AI-assisted, and yours to run, modify, and extend.
 
 ![status](https://img.shields.io/badge/license-MIT-green) ![deps](https://img.shields.io/badge/dependencies-0-blue) ![node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen)
 
@@ -22,7 +22,7 @@ MindSpark is an open-source **mind-mapping app you actually own** - no accounts,
 
 ## Features
 
-Everything below the "Collaboration" heading needs the optional cloud worker; everything above it works fully offline / self-hosted with no account. See **[Local vs cloud](#what-works-offline-vs-what-needs-the-cloud)** for the exact split.
+Everything below the "Collaboration" heading needs the optional cloud worker; everything above it works fully offline / self-hosted - on the self-hosted server behind its own built-in accounts, and with no MindSpark account at all on the static/cloud builds. See **[Local vs cloud](#what-works-offline-vs-what-needs-the-cloud)** for the exact split.
 
 **Editing & canvas** (always local)
 
@@ -79,7 +79,7 @@ Every map *is* a Markdown outline - not a one-way export bolted on afterward. To
 ## What makes MindSpark different
 
 - **A Markdown file, not a proprietary format.** Most mind-mapping tools treat Markdown as a one-way export. Here it's the *native* format in both directions - the canvas and the text editor are two views of the same document, live-synced, so you can drop into a text editor for fast bulk edits and still get a proper diagram back.
-- **You own the data.** No required account. Self-host with one command (`node server.js`, SQLite, zero setup) or run the static build for **$0 forever**, with every map saved as a plain JSON file in *your own* private GitHub repo - never on a vendor's server you don't control.
+- **You own the data.** No vendor account, ever. Self-host with one command and a password (`ADMIN_PASSWORD=... node server.js`, SQLite, zero setup - your own accounts on your own disk), or run the static build for **$0 forever**, with every map saved as a plain JSON file in *your own* private GitHub repo - never on a vendor's server you don't control.
 - **No feature gates, ever.** Real-time collaboration, unlimited maps and nodes, full version history with diffs, every export format - none of it is paywalled or capped, self-hosted or cloud.
 - **Zero runtime dependencies.** The canvas, the LaTeX math rendering, the formula engine, the Markdown parser - all hand-written vanilla JavaScript. Nothing to `npm install`, a minimal supply-chain surface, and the whole editor is one file you can actually read.
 - **Computation inside a mind map.** A built-in formula engine (`SUM(children)`, `AVERAGE`, `IF`, …) with autocomplete - most mind-mapping tools treat every node as inert text; here a branch of numbers can compute a live rollup.
@@ -107,7 +107,7 @@ MindSpark's editor is 100% client-side. The only things that require the optiona
 
 Notes:
 
-- **Local** (`node server.js` / SQLite) has no shared backend - local maps + `#view=` links only, no OAuth/collab. Detected via `fetch('/healthz')` → `MODE='server'` (`public/app.js:361`).
+- **Local** (`node server.js` / SQLite) has no shared backend - maps are held in SQLite behind the server's own accounts (every user sees only their own maps) and `#view=` links stay open, but there is no OAuth/collab. Detected via `fetch('/healthz')` → `MODE='server'` (`public/app.js:361`).
 - **Static Pages** (`*.github.io`, e.g. `https://prasadpatil25.github.io/MindSpark/`) is pure browser + GitHub API with a `repo`-scoped PAT. `OAuth`/collab UI is hidden by host gate `/(^|\.)github\.io$/.test(location.hostname)` → `oauthConfigured()=false` (`public/app.js:11534`), `collabAvailable()=false` (`public/app.js:11537`). Forks get `https://<you>.github.io/MindSpark/` automatically PAT-only.
 - **Worker** (`*.workers.dev`, e.g. `https://mindspark.githubpage.workers.dev/` via `wrangler.jsonc`) serves the same `public/` as static assets **plus** the collab/OAuth worker (`worker/oauth-worker.js`). `GH_OAUTH.workerUrl` is honoured only off-`github.io`, enabling `OAuth`, `#shared=`, live merge and ACLs.
 - The two share links are different by design: **`#view=`** carries the whole map in the URL and needs nothing server-side (read-only); **`#shared=`** points to a live room in the worker and supports editing, collaboration, and access control.
@@ -144,11 +144,13 @@ See the [mindspark-mcp README](https://github.com/prasadpatil25/mindspark-mcp) f
 Requires **Node.js ≥ 22** (for the built-in SQLite + HTTP - no packages to install).
 
 ```bash
-node server.js
+ADMIN_PASSWORD=change-me node server.js
 # → http://localhost:3000
 ```
 
 That's it. No build step, no `npm install`, no native compilation. A SQLite database file is created automatically at `./data/mindspark.db`.
+
+On the **first** run the server creates one administrator from `ADMIN_USER` (default `admin`) and `ADMIN_PASSWORD`. Sign in, open **⚙ Preferences → Account → Manage users**, and add an account for everyone else. Every user - the administrator included - sees only their own maps. If `ADMIN_USER`/`ADMIN_PASSWORD` are unset and there are no accounts yet, the server still starts but warns that nobody can sign in until they are set; an existing password is never overwritten on later starts unless you pass `ADMIN_PASSWORD_RESET=1`. Maps created before accounts existed are claimed by the bootstrap administrator on the next boot.
 
 Optionally, via npm (just runs the same command, but silences the experimental-SQLite notice):
 
@@ -158,16 +160,21 @@ npm start
 
 ### Configuration
 
-All optional, set as environment variables:
+All optional except `ADMIN_PASSWORD` on first run, set as environment variables:
 
 | Variable  | Default                  | Description                |
 |-----------|--------------------------|----------------------------|
 | `PORT`    | `3000`                   | HTTP port                  |
 | `DB_PATH` | `./data/mindspark.db`    | SQLite database file path  |
 | `MS_PUBLIC` | `./public`               | Static frontend directory (legacy `PUBLIC` also honoured unless it's the Windows OS default)  |
+| `ADMIN_USER` | `admin`                | Username of the bootstrap administrator (created only if it does not already exist) |
+| `ADMIN_PASSWORD` | -                    | Password for the bootstrap administrator (required to create it on first run) |
+| `ADMIN_PASSWORD_RESET` | `0`         | Set to `1` to reset the bootstrap administrator's password to `ADMIN_PASSWORD` on boot |
+| `SESSION_TTL_DAYS` | `30`               | How long a sign-in cookie stays valid |
+| `IMPORT_TOKEN` | -                      | Optional bearer token for `POST /api/import` (the GPT flow) |
 
 ```bash
-PORT=8080 DB_PATH=/var/lib/mindspark/db.sqlite node server.js
+PORT=8080 DB_PATH=/var/lib/mindspark/db.sqlite ADMIN_PASSWORD=change-me node server.js
 ```
 
 ## Deployment modes
@@ -176,9 +183,19 @@ MindSpark detects how it's running and picks a storage backend automatically (th
 
 | Mode | Example URL | How to run | Auth | Storage | Collaboration | Cost |
 |---|---|---|---|---|:---:|---|
-| **Local** | `http://localhost:3000` | `node server.js` | None - single user | SQLite on disk | ❌ | Your server |
+| **Local** | `http://localhost:3000` | `node server.js` | Built-in accounts - env-seeded admin, users added in the app | SQLite on disk (per user) | ❌ | Your server |
 | **Static Pages (token-only)** | `https://prasadpatil25.github.io/MindSpark/` (`https://<you>.github.io/MindSpark/` for forks) | Host `public/` on GitHub Pages (or any static host) | GitHub fine-grained token, or a Gitea/Forgejo/GitLab token | User's own private `mindspark-maps` repo | ❌ (no OAuth, no `#shared=`, no live) | **$0** |
 | **Worker (full)** | `https://mindspark.githubpage.workers.dev` | `public/` on Cloudflare Workers **+** the `worker/` collab worker | GitHub OAuth or PAT | User's GitHub repo + shared rooms in the worker | ✅ | **$0** on CF free tier |
+
+### Self-hosted accounts (login, user management, ownership)
+
+The self-hosted server (`node server.js`) has its own lightweight accounts - no GitHub, no OAuth, no third-party identity. Point the server at a port, set `ADMIN_PASSWORD`, and you have a sign-in page and an admin panel.
+
+- **Bootstrap administrator.** On first run `ADMIN_USER` (default `admin`) + `ADMIN_PASSWORD` create one administrator. On later runs the account is left alone - the env value is *not* copied over a live password - unless you pass `ADMIN_PASSWORD_RESET=1`, which force-resets it. Nothing else about accounts lives in the env.
+- **Adding users.** As an administrator, open **⚙ Preferences → Account → Manage users**, type a username and password (minimum 8 characters), optionally tick *Make this user an administrator*, and add. Duplicate usernames are rejected, and passwords are stored only as salted **scrypt** hashes.
+- **Per-user ownership.** Every map is owned by the account that created it - the administrator is no exception. Signing in as a different user shows only that user's maps; there is no shared workspace in self-hosted mode. On upgrade, existing maps (which had no owner) are reassigned to the bootstrap administrator.
+- **Sessions.** Sign-in sets an `HttpOnly`, `SameSite=Lax` cookie with a `SESSION_TTL_DAYS` lifetime (default 30 days); signing out revokes it server-side. The cookie is marked `Secure` only when the request arrives over HTTPS (nginx/Caddy in front), so plain-HTTP LAN use still works.
+- **What stays open.** `#view=` read-only share links and display of a shared map need no sign-in - only the API is gated. As with the other builds, **forgot the password?** no email flow exists; reset it from the server (`ADMIN_PASSWORD_RESET=1`) or add a second admin.
 
 ### Static Pages deployment (PAT-only) - $0 forever
 
@@ -273,35 +290,48 @@ A backend that wants to be discovered implements the worker's client contract:
 
 ```bash
 git clone <your-repo> mindspark && cd mindspark
-PORT=80 node server.js        # put nginx/Caddy in front for TLS
+ADMIN_PASSWORD=change-me PORT=80 node server.js   # put nginx/Caddy in front for TLS
 
 # or Docker:
 docker build -t mindspark .
-docker run -p 3000:3000 -v mindspark-data:/app/data mindspark
+docker run -p 3000:3000 -e ADMIN_PASSWORD=change-me -v mindspark-data:/app/data mindspark
+
+# or Docker Compose (reads ADMIN_USER / ADMIN_PASSWORD / SESSION_TTL_DAYS from .env):
+cp .env.example .env && $EDITOR .env   # set ADMIN_PASSWORD
+docker compose up -d
 ```
 
-Keep it running with systemd/pm2. Sample unit:
+The supplied `docker-compose.yml` mounts `./data` for the SQLite file, publishes on `${HOST_PORT}` (default `3000`; set `HOST_PORT` in `.env`), and refuses to start without `ADMIN_PASSWORD`. Keep it running with systemd/pm2. Sample unit:
 
 ```ini
 [Service]
 ExecStart=/usr/bin/node /opt/mindspark/server.js
 Environment=PORT=3000
+Environment=ADMIN_USER=admin
+Environment=ADMIN_PASSWORD=change-me
 Restart=always
 WorkingDirectory=/opt/mindspark
 ```
 
 ## REST API (self-hosted server)
 
-A plain REST API - build other clients, scripts, or integrations on top of it.
+A plain REST API - build other clients, scripts, or integrations on top of it. Everything except `/healthz` requires a session cookie (or, for `POST /api/import`, the `IMPORT_TOKEN` bearer), and the map endpoints always act on the **signed-in user's own** maps.
 
 | Method   | Path             | Description                          |
 |----------|------------------|--------------------------------------|
-| `GET`    | `/api/maps`      | List all maps (id, title, color)     |
+| `POST`   | `/api/auth/login` | Sign in (`{username,password}`); sets the session cookie |
+| `POST`   | `/api/auth/logout` | Sign out (revokes the session)      |
+| `GET`    | `/api/auth/me`   | Current user (`{id,username,role}`) or `401` |
+| `GET`    | `/api/admin/users` | List users (administrator only)     |
+| `POST`   | `/api/admin/users` | Add a user `{username,password,role}` (administrator only) |
+| `GET`    | `/api/maps`      | List the caller's maps (id, title, color) |
 | `GET`    | `/api/maps/:id`  | Get one full map (nodes + structure) |
 | `POST`   | `/api/maps`      | Create a map (body = map JSON)       |
 | `PUT`    | `/api/maps/:id`  | Update / upsert a map                |
 | `DELETE` | `/api/maps/:id`  | Delete a map                         |
-| `GET`    | `/healthz`       | Health check                         |
+| `GET`    | `/healthz`       | Health check (public)                |
+
+Sign-in returns an `ms_session` cookie. Unauthenticated calls to the map endpoints answer `401`; reaching another user's map answers `404`, because map ids are namespaced per owner.
 
 The collaboration worker exposes a separate `/api/collab/*` surface (shared-map read/write, access-control list, link modes) plus `/api/session` (mint a signed identity) and `/api/import` (GPT map import). Those are documented in [`worker/README.md`](worker/README.md).
 
@@ -322,7 +352,7 @@ A "map" is JSON shaped like:
 
 ### Using a different database
 
-The data layer lives entirely in `server.js` (the `Q` prepared statements and `upsert()` helper). To switch to **PostgreSQL / MySQL**, replace those with your driver's queries - the table is just `(id, title, color, data, updated)` where `data` is the full map JSON. Nothing else in the app needs to change.
+The data layer lives entirely in `server.js` (the `Q` prepared statements and `upsert()` helper). To switch to **PostgreSQL / MySQL**, replace those with your driver's queries - the table is `(owner_id, id, title, color, data, updated)` with `(owner_id, id)` as the primary key, where `data` is the full map JSON. Nothing else in the app needs to change.
 
 ## Project layout
 

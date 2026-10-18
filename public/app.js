@@ -43,7 +43,14 @@
 // instance boot in cloud mode with a working backend underneath.
 const appUrl = path => new URL(path, document.baseURI).href;
 const ServerStore = {
-  async _j(url,opt){ const r=await fetch(appUrl(url),opt); if(!r.ok) throw new Error(r.status); return r.status===204?null:r.json(); },
+  // A 401 means the session is gone (expired or revoked). Tell the app so it can
+  // return to the sign-in overlay instead of quietly reporting "no maps".
+  async _j(url,opt){
+    const r=await fetch(appUrl(url),opt);
+    if(r.status===401){ if(this.onUnauthorized) this.onUnauthorized(); throw new Error(401); }
+    if(!r.ok) throw new Error(r.status);
+    return r.status===204?null:r.json();
+  },
   async list(){ try{ return await this._j('api/maps'); }catch(e){ return []; } },
   async get(id){ try{ return await this._j('api/maps/'+id); }catch(e){ return null; } },
   async save(map){
@@ -58,7 +65,23 @@ const ServerStore = {
   async remove(id){ try{ await this._j('api/maps/'+id,{method:'DELETE'}); }catch(e){ console.warn('map delete failed on the server; it is gone locally but may still exist remotely:', e.message); } },
   // Version history (SQLite-backed snapshots)
   async history(id){ try{ return await this._j('api/maps/'+id+'/versions'); }catch(e){ return []; } },
-  async version(id, ref){ try{ return await this._j('api/maps/'+id+'/versions/'+ref); }catch(e){ return null; } }
+  async version(id, ref){ try{ return await this._j('api/maps/'+id+'/versions/'+ref); }catch(e){ return null; } },
+  // --- auth ---
+  // me() bypasses _j on purpose: a 401 while deciding whether to show the boot
+  // overlay is the expected "not signed in" answer, not a session expiry.
+  async me(){
+    try{ const r=await fetch(appUrl('api/auth/me'),{cache:'no-store'}); if(!r.ok) return null; const j=await r.json(); return (j&&j.user)||null; }
+    catch(e){ return null; }
+  },
+  async login(username,password){
+    const r=await fetch(appUrl('api/auth/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    if(!r.ok){ const err=new Error(r.status===401?'401':'login failed'); err.status=r.status; throw err; }
+    return r.json();
+  },
+  async logout(){ try{ await fetch(appUrl('api/auth/logout'),{method:'POST'}); }catch(e){} },
+  // --- admin ---
+  async listUsers(){ return await this._j('api/admin/users'); },
+  async addUser(u){ return await this._j('api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)}); }
 };
 
 /* ------------------------------------------------------------
@@ -1069,6 +1092,9 @@ const CloudStore = {
 
 let Store;
 let MODE = 'unknown';
+// The signed-in account in self-hosted (server) mode: {id, username, role}.
+// Cloud mode keeps its identity in CloudStore.user instead.
+let CURRENT_USER = null;
 // Wrap document.execCommand so missing-method environments (older Safari without
 // the legacy API, jsdom-based tests, etc.) silently no-op instead of throwing.
 // All inline-formatting toolbar buttons funnel through here.
@@ -1126,7 +1152,12 @@ function probeHealth(){
   return _healthProbe;
 }
 async function initStore(){
-  if(await probeHealth()==='server'){ Store=ServerStore; MODE='server'; return {mode:'server', loggedIn:true}; }
+  if(await probeHealth()==='server'){
+    Store=ServerStore; MODE='server';
+    const user=await ServerStore.me();
+    CURRENT_USER=user;
+    return {mode:'server', loggedIn:!!user, user};
+  }
   Store=CloudStore; MODE='cloud';
   const loggedIn=await CloudStore.tryInit();
   return {mode:'cloud', loggedIn};
@@ -15335,7 +15366,15 @@ function showPreferences(){
       }) : null);
     // Account
     const ac=section('account','Account');
-    if(MODE==='server'){ row(ac, 'Storage', 'local server (SQLite) - no sign-in'); digest('account', 'local server'); }
+    if(MODE==='server'){
+      const su=CURRENT_USER||{};
+      digest('account', su.username ? su.username+' (self-hosted)' : 'not signed in');
+      row(ac, 'Signed in as', su.username ? su.username+(su.role==='admin' ? ' \u00b7 administrator' : '') : '(not signed in)',
+        su.username ? button('Sign out', null, async ()=>{ if(confirm('Sign out of MindSpark?')){ await ServerStore.logout(); location.reload(); } }) : null);
+      if(su.role==='admin')
+        row(ac, 'User management', 'Add users and choose their role',
+          button('Manage users', 'Create accounts for this MindSpark instance', showAdmin));
+    }
     else {
       const user=(typeof CloudStore!=='undefined' && CloudStore.user) ? (CloudStore.user.login||CloudStore.user.username||'') : '';
       digest('account', user ? user+' on '+forgeName() : 'not signed in');
@@ -15743,6 +15782,20 @@ function showSharedPill(editable){
     : 'Viewing a shared map - read-only';
 }
 function showUserPill(){
+  if(MODE==='server'){
+    const pill=$('#userPill'); if(!pill) return;
+    pill.classList.remove('shared-pill'); pill.title='';
+    pill.style.display='flex';
+    const name=(CURRENT_USER && CURRENT_USER.username)||'';
+    const av=$('#userAvatar'), ini=$('#userInitial');
+    if(av) av.hidden=true;   // no avatar in self-hosted mode
+    if(ini){ ini.hidden=false; ini.textContent=(name.trim().charAt(0)||'?').toUpperCase(); }
+    $('#userName').textContent=name;
+    $('#userSignOut').onclick=async()=>{
+      if(confirm('Sign out of MindSpark?')){ await ServerStore.logout(); location.reload(); }
+    };
+    return;
+  }
   const pill=$('#userPill'); if(!pill) return;
   pill.classList.remove('shared-pill'); pill.title='';
   pill.style.display='flex';
@@ -16109,9 +16162,106 @@ window.addEventListener('message', async (ev)=>{
   catch(e){ if(err) err.textContent = e.message || String(e); }
 });
 
+// ---- self-hosted sign-in --------------------------------------------------
+// The server deployment has no git host and no OAuth: one username + password
+// against the local SQLite users table. Reuses the login overlay, revealing the
+// server pane and hiding every cloud-only control.
+function showServerLoginPane(opts){
+  const ov=$('#loginOverlay'); if(!ov) return;
+  ov.classList.add('server-mode');
+  const box=$('#serverLoginPane'); if(box) box.hidden=false;
+  const note=$('#loginShareNote');
+  if(note){
+    if(opts && opts.expired){ note.textContent='Your session expired. Sign in again to keep working.'; note.style.display='block'; }
+    else { note.style.display='none'; }
+  }
+  const u=$('#serverUser'), p=$('#serverPass'), btn=$('#serverSignIn'), err=$('#serverError');
+  if(err) err.textContent='';
+  const doLogin=async()=>{
+    if(!u.value.trim() || !p.value){ err.textContent='Enter your username and password.'; return; }
+    err.textContent=''; btn.disabled=true; btn.textContent='Signing in…';
+    try{
+      const j=await ServerStore.login(u.value.trim(), p.value);
+      CURRENT_USER=(j && j.user)||null;
+      ServerStore.onUnauthorized=handleServerSignOut;
+      ov.style.display='none';
+      showUserPill();
+      await proceedBoot();
+    }catch(e){
+      err.textContent = (e && e.status===401) ? 'Wrong username or password.' : 'Could not sign in - is the server running?';
+      btn.disabled=false; btn.textContent='Sign in';
+    }
+  };
+  btn.onclick=doLogin;
+  // Property handlers, not addEventListener: the overlay reopens on every expiry,
+  // and stacking listeners would sign in twice per Enter.
+  p.onkeydown=e=>{ if(isComposingKey(e)) return; if(e.key==='Enter') doLogin(); };
+  u.onkeydown=e=>{ if(isComposingKey(e)) return; if(e.key==='Enter') p.focus(); };
+  if(!u.value) setTimeout(()=>{ try{ u.focus(); }catch(e){} }, 30);
+}
+
+// A 401 mid-session (expired/revoked cookie) returns the user to the sign-in
+// overlay without losing anything - the maps are on the server, untouched.
+function handleServerSignOut(){
+  CURRENT_USER=null;
+  hideUserPill();
+  showLoginOverlay({ expired:true });
+}
+
+// ---- admin: user management (self-hosted, administrators only) -----------
+async function showAdmin(){
+  const ov=$('#adminOverlay'); if(!ov) return;
+  ov.style.display='flex';
+  const close=$('#adminClose'); if(close) close.onclick=()=>{ ov.style.display='none'; };
+  const err=$('#adminError'); if(err) err.textContent='';
+  const addBtn=$('#adminAddBtn');
+  const doAdd=async()=>{
+    const username=($('#adminNewUser').value||'').trim();
+    const password=$('#adminNewPass').value||'';
+    const role=$('#adminNewAdmin').checked ? 'admin' : 'user';
+    if(!username || !password){ err.textContent='Enter a username and a password.'; return; }
+    err.textContent=''; addBtn.disabled=true; addBtn.textContent='Adding…';
+    try{
+      await ServerStore.addUser({username, password, role});
+      $('#adminNewUser').value=''; $('#adminNewPass').value=''; $('#adminNewAdmin').checked=false;
+      await renderAdminUsers();
+    }catch(e){
+      err.textContent = String(e.message)==='409' ? 'That username is already taken.'
+        : String(e.message)==='400' ? 'Check the username (3-32 chars) and password (at least 8).'
+        : 'Could not add the user.';
+    }finally{ addBtn.disabled=false; addBtn.textContent='Add user'; }
+  };
+  addBtn.onclick=doAdd;
+  $('#adminNewPass').onkeydown=e=>{ if(isComposingKey(e)) return; if(e.key==='Enter') doAdd(); };
+  await renderAdminUsers();
+}
+
+async function renderAdminUsers(){
+  const list=$('#adminList'); if(!list) return;
+  list.textContent='Loading…';
+  try{
+    const users=await ServerStore.listUsers();
+    list.textContent='';
+    if(!users.length){ list.textContent='No users yet.'; return; }
+    const meId=(CURRENT_USER&&CURRENT_USER.id)||'';
+    for(const u of users){
+      const r=document.createElement('div'); r.className='admin-row';
+      const who=document.createElement('span'); who.className='admin-who';
+      who.textContent=u.username+(u.id===meId?' (you)':'');
+      const role=document.createElement('span'); role.className='admin-role-badge';
+      role.textContent=u.role==='admin'?'admin':'user';
+      r.appendChild(who); r.appendChild(role);
+      list.appendChild(r);
+    }
+  }catch(e){
+    list.textContent='Could not load users.';
+  }
+}
+
 function showLoginOverlay(opts){
   const ov=$('#loginOverlay'); if(!ov) return;
   ov.style.display='flex';
+  if(MODE==='server'){ showServerLoginPane(opts); return; }
   const note=$('#loginShareNote');
   if(note){
     if(opts && opts.shared){ note.textContent='This map was shared with you. Sign in to open it.'; note.style.display='block'; }
@@ -17433,7 +17583,17 @@ else loadQotd();
     if(loggedIn){ showUserPill(); await ensureCollabIdentity(); await proceedBoot(); await _openSharedAfterBoot(); }
     else if(_sh){ _pendingSharedLink={ id:decodeURIComponent(_sh[1]), token:_sh[2]?decodeURIComponent(_sh[2]):null }; showLoginOverlay({ shared:true }); }   // shared link -> require sign-in first
     else { showLoginOverlay(CloudStore.sessionExpired ? {expired:true} : (CloudStore.lastInitError ? {unreachable:true} : undefined)); }
+  } else if(mode==='server'){
+    // Self-hosted: every map belongs to the signed-in account. Not signed in ->
+    // the sign-in overlay; a mid-session 401 drops back here via onUnauthorized.
+    if(loggedIn){
+      ServerStore.onUnauthorized=handleServerSignOut;
+      showUserPill();
+      await proceedBoot(); await _openSharedAfterBoot();
+    } else {
+      showLoginOverlay();
+    }
   } else {
-    await proceedBoot(); await _openSharedAfterBoot();   // server / local mode
+    await proceedBoot(); await _openSharedAfterBoot();
   }
 })().catch(e=>{ console.error(e); if(!map) createMap(); });

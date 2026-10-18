@@ -39,54 +39,218 @@ const PUBLIC =
 // ---- database ------------------------------------------------------------
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
+
+// Accounts + sessions. A self-hosted instance is no longer a single anonymous
+// workspace: an administrator (seeded from the environment) creates users, and
+// each user only ever sees their own maps.
 db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user',
+    created       INTEGER NOT NULL,
+    disabled      INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token   TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    expires INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
+`);
+
+// ---- auth primitives -----------------------------------------------------
+// Passwords: scrypt (built into node:crypto) with a per-user random salt, stored
+// as `scrypt$<saltHex>$<hashHex>`. Sessions: an opaque random token in an
+// HttpOnly cookie, with a row in `sessions` so it can be revoked by deleting it.
+const COOKIE_NAME = 'ms_session';
+const SCRYPT_KEYLEN = 64;
+const SESSION_TTL_MS = Math.max(1, Number(process.env.SESSION_TTL_DAYS) || 30) * 24 * 60 * 60 * 1000;
+
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pw), salt, SCRYPT_KEYLEN).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+function verifyPassword(pw, stored) {
+  const parts = String(stored || '').split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  let got;
+  try { got = crypto.scryptSync(String(pw), parts[1], SCRYPT_KEYLEN).toString('hex'); }
+  catch (e) { return false; }
+  const a = Buffer.from(got, 'hex'), b = Buffer.from(parts[2], 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function parseCookies(req) {
+  const out = {};
+  const raw = req.headers && req.headers.cookie;
+  if (!raw) return out;
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+// `Secure` is added only when the request really arrived over TLS (a reverse
+// proxy sets x-forwarded-proto), so the cookie still works on plain-http
+// localhost during setup.
+function cookieHeader(value, req, maxAgeSec) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return `${COOKIE_NAME}=${value}; Path=/; HttpOnly; SameSite=Lax`
+    + (proto === 'https' ? '; Secure' : '')
+    + (maxAgeSec != null ? `; Max-Age=${maxAgeSec}` : '');
+}
+
+// ---- bootstrap administrator --------------------------------------------
+// ADMIN_USER / ADMIN_PASSWORD seed one administrator on first run. The password
+// is never overwritten on later starts (that would let an edited env file
+// silently change a live password); set ADMIN_PASSWORD_RESET=1 to force it.
+function ensureBootstrapAdmin() {
+  const username = (process.env.ADMIN_USER || '').trim();
+  const password = process.env.ADMIN_PASSWORD || '';
+  if (!username || !password) {
+    const n = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+    if (!n) console.warn('\n  \u26a0  No users exist and ADMIN_USER/ADMIN_PASSWORD are not set - nobody can sign in yet.');
+    return '';
+  }
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  if (existing) {
+    if (process.env.ADMIN_PASSWORD_RESET === '1') {
+      db.prepare("UPDATE users SET password_hash = ?, role = 'admin' WHERE id = ?").run(hashPassword(password), existing.id);
+      console.log(`  Administrator password reset for "${username}".`);
+    }
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  db.prepare("INSERT INTO users (id,username,password_hash,role,created) VALUES (?,?,?,'admin',?)")
+    .run(id, username, hashPassword(password), Date.now());
+  console.log(`  Created administrator "${username}".`);
+  return id;
+}
+const ADMIN_ID = ensureBootstrapAdmin();
+
+// ---- maps + versions (owned by a user) ----------------------------------
+// Owner-scoped with a COMPOSITE primary key, so two accounts can never collide
+// on a map id and one account can never reach another's rows.
+const MAP_TABLES = `
   CREATE TABLE IF NOT EXISTS maps (
-    id      TEXT PRIMARY KEY,
-    title   TEXT NOT NULL DEFAULT 'Untitled map',
-    color   TEXT,
-    data    TEXT NOT NULL,
-    updated INTEGER NOT NULL
+    owner_id TEXT NOT NULL,
+    id       TEXT NOT NULL,
+    title    TEXT NOT NULL DEFAULT 'Untitled map',
+    color    TEXT,
+    data     TEXT NOT NULL,
+    updated  INTEGER NOT NULL,
+    PRIMARY KEY (owner_id, id)
   );
   CREATE TABLE IF NOT EXISTS map_versions (
-    id    TEXT NOT NULL,
-    ts    INTEGER NOT NULL,
-    data  TEXT NOT NULL,
-    PRIMARY KEY (id, ts)
+    owner_id TEXT NOT NULL,
+    id       TEXT NOT NULL,
+    ts       INTEGER NOT NULL,
+    data     TEXT NOT NULL,
+    PRIMARY KEY (owner_id, id, ts)
   );
-  CREATE INDEX IF NOT EXISTS idx_versions_id ON map_versions (id, ts DESC);
-`);
+`;
+// A database written before authentication existed has maps(id PRIMARY KEY) with
+// no owner_id. Upgrade it in place and hand those maps to the bootstrap
+// administrator so nothing is lost.
+function migrateLegacyMaps(adminId) {
+  let cols = [];
+  try { cols = db.prepare('PRAGMA table_info(maps)').all().map(c => c.name); } catch (e) { cols = []; }
+  if (!cols.length || cols.includes('owner_id')) return;   // fresh, or already migrated
+  const owner = adminId || '';
+  db.exec('ALTER TABLE maps RENAME TO maps_legacy');
+  const hadVersions = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_versions'").get();
+  if (hadVersions) db.exec('ALTER TABLE map_versions RENAME TO map_versions_legacy');
+  db.exec(MAP_TABLES);
+  db.prepare('INSERT INTO maps (owner_id,id,title,color,data,updated) SELECT ?,id,title,color,data,updated FROM maps_legacy').run(owner);
+  if (hadVersions) {
+    db.prepare('INSERT INTO map_versions (owner_id,id,ts,data) SELECT ?,id,ts,data FROM map_versions_legacy').run(owner);
+    db.exec('DROP TABLE map_versions_legacy');
+  }
+  db.exec('DROP TABLE maps_legacy');
+  console.log(owner
+    ? '  Migrated existing maps to the administrator account.'
+    : '  Migrated existing maps with no owner - set ADMIN_USER/ADMIN_PASSWORD to claim them.');
+}
+migrateLegacyMaps(ADMIN_ID);
+db.exec(MAP_TABLES);
+// Created after any migration so the name is free: renaming a table keeps its
+// old index, and an IF NOT EXISTS index of the same name would then be a no-op.
+db.exec('CREATE INDEX IF NOT EXISTS idx_versions_id ON map_versions (owner_id, id, ts DESC)');
+
 const Q = {
-  list:   db.prepare('SELECT id, title, color, updated FROM maps ORDER BY updated DESC'),
-  get:    db.prepare('SELECT data FROM maps WHERE id = ?'),
-  insert: db.prepare('INSERT INTO maps (id,title,color,data,updated) VALUES (?,?,?,?,?)'),
-  update: db.prepare('UPDATE maps SET title=?, color=?, data=?, updated=? WHERE id=?'),
-  del:    db.prepare('DELETE FROM maps WHERE id = ?'),
+  list:   db.prepare('SELECT id, title, color, updated FROM maps WHERE owner_id = ? ORDER BY updated DESC'),
+  get:    db.prepare('SELECT data FROM maps WHERE owner_id = ? AND id = ?'),
+  ownsMap: db.prepare('SELECT 1 AS ok FROM maps WHERE owner_id = ? AND id = ?'),
+  insert: db.prepare('INSERT INTO maps (owner_id,id,title,color,data,updated) VALUES (?,?,?,?,?,?)'),
+  update: db.prepare('UPDATE maps SET title=?, color=?, data=?, updated=? WHERE owner_id = ? AND id = ?'),
+  del:    db.prepare('DELETE FROM maps WHERE owner_id = ? AND id = ?'),
   // version history
-  vLatest: db.prepare('SELECT ts, data FROM map_versions WHERE id = ? ORDER BY ts DESC LIMIT 1'),
-  vUpdate: db.prepare('UPDATE map_versions SET data = ? WHERE id = ? AND ts = ?'),
-  vInsert: db.prepare('INSERT OR REPLACE INTO map_versions (id,ts,data) VALUES (?,?,?)'),
-  vList:   db.prepare('SELECT ts FROM map_versions WHERE id = ? ORDER BY ts DESC LIMIT 100'),
-  vGet:    db.prepare('SELECT data FROM map_versions WHERE id = ? AND ts = ?'),
-  vDelOld: db.prepare('DELETE FROM map_versions WHERE id = ? AND ts NOT IN (SELECT ts FROM map_versions WHERE id = ? ORDER BY ts DESC LIMIT 50)'),
-  vDelAll: db.prepare('DELETE FROM map_versions WHERE id = ?')
+  vLatest: db.prepare('SELECT ts, data FROM map_versions WHERE owner_id = ? AND id = ? ORDER BY ts DESC LIMIT 1'),
+  vUpdate: db.prepare('UPDATE map_versions SET data = ? WHERE owner_id = ? AND id = ? AND ts = ?'),
+  vInsert: db.prepare('INSERT OR REPLACE INTO map_versions (owner_id,id,ts,data) VALUES (?,?,?,?)'),
+  vList:   db.prepare('SELECT ts FROM map_versions WHERE owner_id = ? AND id = ? ORDER BY ts DESC LIMIT 100'),
+  vGet:    db.prepare('SELECT data FROM map_versions WHERE owner_id = ? AND id = ? AND ts = ?'),
+  vDelOld: db.prepare('DELETE FROM map_versions WHERE owner_id = ? AND id = ? AND ts NOT IN (SELECT ts FROM map_versions WHERE owner_id = ? AND id = ? ORDER BY ts DESC LIMIT 50)'),
+  vDelAll: db.prepare('DELETE FROM map_versions WHERE owner_id = ? AND id = ?'),
+  // users / sessions
+  userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
+  userById:   db.prepare('SELECT id, username, role, disabled FROM users WHERE id = ?'),
+  userList:   db.prepare('SELECT id, username, role, created, disabled FROM users ORDER BY created ASC'),
+  userInsert: db.prepare('INSERT INTO users (id,username,password_hash,role,created) VALUES (?,?,?,?,?)'),
+  userCount:  db.prepare('SELECT COUNT(*) AS n FROM users'),
+  sessionInsert: db.prepare('INSERT INTO sessions (token,user_id,created,expires) VALUES (?,?,?,?)'),
+  sessionGet:    db.prepare('SELECT token, user_id AS userId, expires FROM sessions WHERE token = ?'),
+  sessionDel:    db.prepare('DELETE FROM sessions WHERE token = ?'),
+  sessionDelUser: db.prepare('DELETE FROM sessions WHERE user_id = ?')
 };
-const upsert = (m) => {
+
+// Resolve the signed-in user from the request cookie, or null. A disabled user
+// or an expired session is treated as signed out (and the row is dropped).
+function authUser(req) {
+  const token = parseCookies(req)[COOKIE_NAME];
+  if (!token) return null;
+  const row = Q.sessionGet.get(token);
+  if (!row) return null;
+  if (row.expires && row.expires < Date.now()) { Q.sessionDel.run(token); return null; }
+  const u = Q.userById.get(row.userId);
+  if (!u || u.disabled) { Q.sessionDel.run(token); return null; }
+  return { id: u.id, username: u.username, role: u.role };
+}
+// These answer the response themselves (401/403) and return null, so a route is
+// `const u = requireAuth(req, res); if (!u) return;`.
+function requireAuth(req, res) {
+  const u = authUser(req);
+  if (!u) { send(res, 401, { error: 'unauthorized' }); return null; }
+  return u;
+}
+function requireAdmin(req, res) {
+  const u = requireAuth(req, res);
+  if (!u) return null;
+  if (u.role !== 'admin') { send(res, 403, { error: 'forbidden' }); return null; }
+  return u;
+}
+
+const upsert = (m, ownerId) => {
   const data = JSON.stringify(m);
   const updated = m.updated || Date.now();
-  const r = Q.update.run(m.title || 'Untitled map', m.color || null, data, updated, m.id);
-  if (r.changes === 0) Q.insert.run(m.id, m.title || 'Untitled map', m.color || null, data, updated);
+  const r = Q.update.run(m.title || 'Untitled map', m.color || null, data, updated, ownerId, m.id);
+  if (r.changes === 0) Q.insert.run(ownerId, m.id, m.title || 'Untitled map', m.color || null, data, updated);
   // Snapshot a version only when the content actually changed (skips no-op autosaves),
   // then prune to the most recent 50 per map. Saves within a minute of the newest
   // version refine that version instead of adding one: autosave runs after every
   // 0.6s pause in editing, so a version per save let the 50-version cap cover only
   // the last few minutes - and wrote a full copy of the map (images included) each time.
-  const last = Q.vLatest.get(m.id);
+  const last = Q.vLatest.get(ownerId, m.id);
   if (!last || last.data !== data) {
     if (last && updated - last.ts < VERSION_WINDOW_MS) {
-      Q.vUpdate.run(data, m.id, last.ts);
+      Q.vUpdate.run(data, ownerId, m.id, last.ts);
     } else {
-      Q.vInsert.run(m.id, updated, data);
-      Q.vDelOld.run(m.id, m.id);
+      Q.vInsert.run(ownerId, m.id, updated, data);
+      Q.vDelOld.run(ownerId, m.id, ownerId, m.id);
     }
   }
 };
@@ -311,24 +475,84 @@ const server = http.createServer(async (req, res) => {
   ].join('; ')));
 
   try {
-    // ----- API -----
-    if (p === '/api/maps' && req.method === 'GET') return send(res, 200, Q.list.all());
+    // ----- auth -----
+    if (p === '/api/auth/me' && req.method === 'GET') {
+      const u = authUser(req);
+      return u ? send(res, 200, { user: u }) : send(res, 401, { error: 'unauthorized' });
+    }
+
+    if (p === '/api/auth/login' && req.method === 'POST') {
+      const body = await readBody(req);
+      const username = (typeof body.username === 'string') ? body.username.trim() : '';
+      const password = (typeof body.password === 'string') ? body.password : '';
+      const row = username ? Q.userByName.get(username) : null;
+      // Verify against a dummy hash when the user is unknown, so a wrong username
+      // and a wrong password take the same time (no account enumeration).
+      const ok = row && !row.disabled
+        ? verifyPassword(password, row.password_hash)
+        : (verifyPassword(password, 'scrypt$00$00'), false);
+      if (!ok) return send(res, 401, { error: 'invalid username or password' });
+      const token = crypto.randomBytes(32).toString('base64url');
+      const now = Date.now();
+      Q.sessionInsert.run(token, row.id, now, now + SESSION_TTL_MS);
+      res.setHeader('Set-Cookie', cookieHeader(token, req, Math.floor(SESSION_TTL_MS / 1000)));
+      return send(res, 200, { user: { id: row.id, username: row.username, role: row.role } });
+    }
+
+    if (p === '/api/auth/logout' && req.method === 'POST') {
+      const token = parseCookies(req)[COOKIE_NAME];
+      if (token) Q.sessionDel.run(token);
+      res.setHeader('Set-Cookie', cookieHeader('', req, 0));
+      res.writeHead(204); return res.end();
+    }
+
+    // ----- admin: user management -----
+    if (p === '/api/admin/users' && req.method === 'GET') {
+      const admin = requireAdmin(req, res); if (!admin) return;
+      return send(res, 200, Q.userList.all());
+    }
+    if (p === '/api/admin/users' && req.method === 'POST') {
+      const admin = requireAdmin(req, res); if (!admin) return;
+      const body = await readBody(req);
+      const username = (typeof body.username === 'string') ? body.username.trim() : '';
+      const password = (typeof body.password === 'string') ? body.password : '';
+      const role = body.role === 'admin' ? 'admin' : 'user';
+      if (!/^[A-Za-z0-9._@-]{3,32}$/.test(username))
+        return send(res, 400, { error: 'username must be 3-32 characters (letters, digits, . _ @ -)' });
+      if (password.length < 8) return send(res, 400, { error: 'password must be at least 8 characters' });
+      if (Q.userByName.get(username)) return send(res, 409, { error: 'that username is already taken' });
+      const id = crypto.randomUUID();
+      Q.userInsert.run(id, username, hashPassword(password), role, Date.now());
+      return send(res, 201, { id, username, role });
+    }
+
+    // ----- maps (owner-scoped: every route answers for the signed-in user only) -----
+    if (p === '/api/maps' && req.method === 'GET') {
+      const u = requireAuth(req, res); if (!u) return;
+      return send(res, 200, Q.list.all(u.id));
+    }
 
     if (p === '/api/maps' && req.method === 'POST') {
+      const u = requireAuth(req, res); if (!u) return;
       const m = await readBody(req);
       if (!isMapBody(m)) return send(res, 400, { error: 'body must be a JSON object' });
       if (!m.id) return send(res, 400, { error: 'missing map id' });
-      upsert(m); return send(res, 201, { ok: true, id: m.id });
+      upsert(m, u.id); return send(res, 201, { ok: true, id: m.id });
     }
 
     if (p === '/api/import' && req.method === 'POST') {
-      if (process.env.IMPORT_TOKEN && req.headers.authorization !== 'Bearer ' + process.env.IMPORT_TOKEN)
-        return send(res, 401, { error: 'unauthorized' });
+      // Accepts the machine IMPORT_TOKEN (GPT integration) OR a signed-in user.
+      // A token import has no user, so the map is filed under the administrator.
+      const bearerOk = !!process.env.IMPORT_TOKEN && req.headers.authorization === 'Bearer ' + process.env.IMPORT_TOKEN;
+      const u = bearerOk ? null : authUser(req);
+      if (!bearerOk && !u) return send(res, 401, { error: 'unauthorized' });
+      const owner = u ? u.id : ADMIN_ID;
+      if (!owner) return send(res, 501, { error: 'no owner available for the import - set ADMIN_USER/ADMIN_PASSWORD' });
       const spec = await readBody(req);
       let m;
       try { m = buildMapFromSpec(spec); }
       catch (e) { return send(res, 400, { error: String(e && e.message || e) }); }
-      upsert(m);
+      upsert(m, owner);
       const proto = req.headers['x-forwarded-proto'] || 'http';
       const host = req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT);
       return send(res, 201, { id: m.id, url: `${proto}://${host}/?map=${m.id}` });
@@ -336,31 +560,36 @@ const server = http.createServer(async (req, res) => {
 
     const idMatch = p.match(/^\/api\/maps\/([\w-]+)$/);
     if (idMatch) {
+      const u = requireAuth(req, res); if (!u) return;
       const id = idMatch[1];
       if (req.method === 'GET') {
-        const row = Q.get.get(id);
+        const row = Q.get.get(u.id, id);
         return row ? send(res, 200, row.data, 'application/json') : send(res, 404, { error: 'not found' });
       }
       if (req.method === 'PUT') {
         const m = await readBody(req);
         if (!isMapBody(m)) return send(res, 400, { error: 'body must be a JSON object' });
-        m.id = id; upsert(m);
+        m.id = id; upsert(m, u.id);
         return send(res, 200, { ok: true, id });
       }
-      if (req.method === 'DELETE') { Q.del.run(id); Q.vDelAll.run(id); res.writeHead(204); return res.end(); }
+      if (req.method === 'DELETE') { Q.del.run(u.id, id); Q.vDelAll.run(u.id, id); res.writeHead(204); return res.end(); }
     }
 
     // ----- version history -----
     const vListMatch = p.match(/^\/api\/maps\/([\w-]+)\/versions$/);
     if (vListMatch && req.method === 'GET') {
-      return send(res, 200, Q.vList.all(vListMatch[1]).map(r => ({ ts: r.ts })));
+      const u = requireAuth(req, res); if (!u) return;
+      if (!Q.ownsMap.get(u.id, vListMatch[1])) return send(res, 404, { error: 'not found' });
+      return send(res, 200, Q.vList.all(u.id, vListMatch[1]).map(r => ({ ts: r.ts })));
     }
     const vGetMatch = p.match(/^\/api\/maps\/([\w-]+)\/versions\/(\d+)$/);
     if (vGetMatch && req.method === 'GET') {
-      const row = Q.vGet.get(vGetMatch[1], Number(vGetMatch[2]));
+      const u = requireAuth(req, res); if (!u) return;
+      const row = Q.vGet.get(u.id, vGetMatch[1], Number(vGetMatch[2]));
       return row ? send(res, 200, row.data, 'application/json') : send(res, 404, { error: 'not found' });
     }
 
+    // Public: the deployment-mode probe the client uses before it knows anything.
     if (p === '/healthz') return send(res, 200, { ok: true });
 
     // ----- static files -----

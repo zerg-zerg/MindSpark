@@ -13,3 +13,4 @@ public/.nojekyll
 !.dev.vars.example
 .env*
 !.env.example
+.omo
