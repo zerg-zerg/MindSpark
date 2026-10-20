@@ -41,12 +41,8 @@
 // still finds its own API. Every other app URL (./sw.js, ./styles.css) is
 // already relative; these were the only absolute ones, and they made such an
 // instance boot in cloud mode with a working backend underneath.
-// A published map lives at /public/<guid>, where a relative URL would otherwise
-// resolve under /public/. Pin the document base to the app root before anything
-// calls appUrl() - a dynamically inserted <base> updates document.baseURI.
-if(/^\/public\/[\w-]+\/?$/.test(location.pathname)){
-  const _base=document.createElement('base'); _base.href='/'; document.head.prepend(_base);
-}
+// server.js pins <base href="/"> in the served /public/<guid> page, so appUrl()
+// and fetch('demo-map.json') resolve at the app root.
 const appUrl = path => new URL(path, document.baseURI).href;
 const ServerStore = {
   // A 401 means the session is gone (expired or revoked). Tell the app so it can

@@ -392,6 +392,12 @@ const withExtraConnect = (policy) => EXTRA_CONNECT ? policy.replace(/(connect-sr
 const withExtraConnectHtml = (html) => EXTRA_CONNECT
   ? html.replace(/(<meta http-equiv="Content-Security-Policy" content="[^"]*?connect-src [^;"]+)/, '$1 ' + EXTRA_CONNECT)
   : html;
+// A published map lives at /public/<guid>, one level below the app root.
+// Without a base the browser resolves ./styles.css, ./templates.js and ./app.js
+// under /public/ and the static handler answers 404. Inject the base into the
+// document itself rather than from JS: the preload scanner has to see it before
+// it resolves those URLs. Static deployments at a sub-path never take this route.
+const withPublicBase = (html) => html.replace(/<head[^>]*>/i, m => m + '<base href="/">');
 
 // ---- tiny helpers --------------------------------------------------------
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css',
@@ -678,12 +684,21 @@ const server = http.createServer(async (req, res) => {
       try { st = fs.statSync(full); } catch (e) { /* falls through to 404 */ }
       if (st && st.isFile()) {
         const entry = fileEntry(full, st);
-        // The page's own <meta> policy gets the same extra origins as the header.
-        const rewritten = EXTRA_CONNECT && path.extname(full) === '.html';
-        if (rewritten && entry.html === undefined) {
-          entry.html = Buffer.from(withExtraConnectHtml(entry.data.toString('utf8')));
+        const isHtml = path.extname(full) === '.html';
+        // The page's own <meta> policy gets the same extra origins as the
+        // header, and a published page also gets a <base> so its relative asset
+        // and API URLs resolve at the app root. Keep the public variant separate
+        // from the root page's cached HTML.
+        const publicShell = isHtml && !!pubPage;
+        const rewritten = isHtml && (publicShell || !!EXTRA_CONNECT);
+        const variant = publicShell ? 'publicHtml' : 'html';
+        if (rewritten && entry[variant] === undefined) {
+          let html = entry.data.toString('utf8');
+          if (publicShell) html = withPublicBase(html);
+          if (EXTRA_CONNECT) html = withExtraConnectHtml(html);
+          entry[variant] = Buffer.from(html);
         }
-        const body = rewritten ? entry.html : entry.data;
+        const body = rewritten ? entry[variant] : entry.data;
         // `no-cache` still forces a round trip before anything is reused, which
         // is the invariant sw.js is built around: app.js and styles.css keep
         // their URLs forever, so a client must never serve an old build off its
@@ -693,7 +708,7 @@ const server = http.createServer(async (req, res) => {
         // answers 304 and sends nothing, so freshness is unchanged and only
         // the bytes go away. Weak, because the gzipped and identity encodings
         // of one file are the same thing semantically and share the tag.
-        const key = rewritten ? 'htmlEtag' : 'etag';
+        const key = rewritten ? variant + 'Etag' : 'etag';
         if (entry[key] === undefined) {
           entry[key] = 'W/"' + crypto.createHash('sha1').update(body).digest('base64url') + '"';
         }
