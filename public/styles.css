@@ -1298,9 +1298,9 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .hint .close{float:right;margin-left:8px;cursor:pointer;color:var(--ink-soft);border:none;background:none;font-size:14px}
 
   /* ===== Nodes ===== */
-  .node{position:absolute;background:var(--card-bg);border:1.5px solid var(--line);border-radius:var(--node-radius, 12px);padding:var(--node-pad-y, 9px) var(--node-pad-x, 15px);font-size:calc(15px * var(--look-node-size, 1));font-weight:500;line-height:1.35;box-shadow:var(--shadow);width:max-content;max-width:240px;min-width:34px;user-select:none;transition:background-color .3s ease,color .3s ease,box-shadow .15s,border-color .15s,transform .06s;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box}
+  .node{position:absolute;background:var(--card-bg);border:1.5px solid var(--line);border-radius:var(--node-radius, 12px);padding:calc(var(--node-pad-y, 9px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 15px) * var(--theme-pad-scale, 1));font-size:calc(15px * var(--look-node-size, 1));font-weight:500;line-height:1.35;box-shadow:var(--shadow);width:max-content;max-width:240px;min-width:34px;user-select:none;transition:background-color .3s ease,color .3s ease,box-shadow .15s,border-color .15s,transform .06s;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box}
   .node:hover{box-shadow:var(--shadow-lg)}
-  .node.root{font-family:var(--serif);font-weight:600;font-size:calc(19px * var(--look-node-size, 1));padding:var(--node-pad-y, 12px) var(--node-pad-x, 22px);border-width:0}
+  .node.root{font-family:var(--serif);font-weight:600;font-size:calc(19px * var(--look-node-size, 1));padding:calc(var(--node-pad-y, 12px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 22px) * var(--theme-pad-scale, 1));border-width:0}
   .node.sel{outline:2.5px solid var(--accent);outline-offset:2px}
   .node.editing{cursor:text;user-select:text;outline:none !important;box-shadow:none}
   .node.editing .node-text{outline:none}
@@ -1571,9 +1571,9 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   #viewport[data-style="classic"] .node{border-radius:var(--node-radius, 4px); border-width:1.5px}
   #viewport[data-style="classic"]{--edge-color:var(--line-2);--edge-width:1.6}
   #viewport[data-style="classic"] .node.root{border-radius:var(--node-radius, 6px)}
-  #viewport[data-style="bubble"]  .node{border-radius:var(--node-radius, 50px); padding:var(--node-pad-y, 10px) var(--node-pad-x, 10px); border-width:0; box-shadow:0 0 var(--node-glow, 0) var(--node-glow, 0) color-mix(in srgb, var(--accent) 20%, transparent)}
+  #viewport[data-style="bubble"]  .node{border-radius:var(--node-radius, 50px); padding:calc(var(--node-pad-y, 10px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 10px) * var(--theme-pad-scale, 1)); border-width:0; box-shadow:0 0 var(--node-glow, 0) var(--node-glow, 0) color-mix(in srgb, var(--accent) 20%, transparent)}
   #viewport[data-style="bubble"] {--edge-color:var(--accent);--edge-width:2}
-  #viewport[data-style="bubble"]  .node.root{padding:calc(var(--node-pad-y, 10px) + 3px) calc(var(--node-pad-x, 10px) + 4px)}
+  #viewport[data-style="bubble"]  .node.root{padding:calc((var(--node-pad-y, 10px) + 3px) * var(--theme-pad-scale, 1)) calc((var(--node-pad-x, 10px) + 4px) * var(--theme-pad-scale, 1))}
   #viewport[data-style="sketch"]  .node{border-radius:var(--node-radius, 3px); border-width:2px; border-color:var(--ink); box-shadow:none; transform:rotate(var(--tilt,0deg))}
   #viewport[data-style="sketch"]  .node.root{border-width:0}
   #viewport[data-style="sketch"] {--edge-color:var(--ink-soft);--edge-width:1.6}
@@ -1607,7 +1607,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   /* Legal pad: punch holes and the accent margin live in a reserved left strip
      (hence padding-left) and rules run full width under them like a real pad.
      Background layers paint first-listed on top. */
-  #viewport[data-style="paper"]    .node{border-radius:var(--node-radius, 6px); border-width:1px; border-color:var(--line); background-color:var(--card-bg); padding-left:max(18px, var(--node-pad-x, 15px)); padding-right:max(18px, var(--node-pad-x, 15px)); background-image:radial-gradient(circle at 6px 25%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), radial-gradient(circle at 6px 50%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), radial-gradient(circle at 6px 75%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), linear-gradient(90deg, transparent 0 15px, color-mix(in srgb, var(--accent) 65%, transparent) 15px 16.5px, transparent 16.5px), repeating-linear-gradient(180deg, transparent 0 22px, color-mix(in srgb, var(--line) 22%, transparent) 23px); background-size:100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 23px; box-shadow:0 2px 6px color-mix(in srgb, var(--ink) 10%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent)}
+  #viewport[data-style="paper"]    .node{border-radius:var(--node-radius, 6px); border-width:1px; border-color:var(--line); background-color:var(--card-bg); padding-left:max(18px, calc(max(18px, var(--node-pad-x, 15px)) * var(--theme-pad-scale, 1))); padding-right:max(18px, calc(max(18px, var(--node-pad-x, 15px)) * var(--theme-pad-scale, 1))); background-image:radial-gradient(circle at 6px 25%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), radial-gradient(circle at 6px 50%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), radial-gradient(circle at 6px 75%, color-mix(in srgb, var(--ink) 16%, transparent) 0 3px, transparent 3.4px), linear-gradient(90deg, transparent 0 15px, color-mix(in srgb, var(--accent) 65%, transparent) 15px 16.5px, transparent 16.5px), repeating-linear-gradient(180deg, transparent 0 22px, color-mix(in srgb, var(--line) 22%, transparent) 23px); background-size:100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 23px; box-shadow:0 2px 6px color-mix(in srgb, var(--ink) 10%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent)}
   #viewport[data-style="paper"]    .node.root{border-radius:var(--node-radius, 8px)}
   #viewport[data-style="paper"]    #edges path{stroke-linecap:round}
   #viewport[data-style="terminal"] {--edge-color:var(--accent);--edge-width:1.6}
@@ -1618,7 +1618,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     border-radius:0;
     box-shadow:none;
     text-shadow:0 0 6px color-mix(in srgb, var(--accent) 40%, transparent);
-    padding:8px 10px 6px 10px;
+    padding:calc(8px * var(--theme-pad-scale, 1)) calc(10px * var(--theme-pad-scale, 1)) calc(6px * var(--theme-pad-scale, 1)) calc(10px * var(--theme-pad-scale, 1));
     justify-content:flex-start;
     text-align:left;
   }
@@ -1638,7 +1638,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     border-radius:0;
     box-shadow:none;
     text-shadow:0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
-    padding:10px 14px 8px 14px;
+    padding:calc(10px * var(--theme-pad-scale, 1)) calc(14px * var(--theme-pad-scale, 1)) calc(8px * var(--theme-pad-scale, 1)) calc(14px * var(--theme-pad-scale, 1));
     justify-content:flex-start;
     text-align:left;
   }
@@ -4092,7 +4092,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   }
 
   /* ===== Task state ===== */
-  .node.has-image{flex-direction:column; align-items:stretch; padding-top:8px}
+  .node.has-image{flex-direction:column; align-items:stretch; padding-top:calc(8px * var(--theme-pad-scale, 1))}
   /* Image nodes size themselves to the picture. Two changes from the
      original rule, both deliberate:
        - object-fit was `cover`, which CROPS the image to fill the box; an

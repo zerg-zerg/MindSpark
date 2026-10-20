@@ -1591,9 +1591,12 @@ function render(){
   // three written only by applyLookConfigVars (look defaults plus map.lookConfig)
   // or by a :root[data-look] rule, so the look id and lookConfig already cover
   // them. Themes cannot move them, being colours only. An attribute read is free.
+  // Theme size is here because it scales --theme-pad-scale: changing it changes
+  // every card's padding, so cached elements and their w/h must be rebuilt and
+  // re-measured rather than merely repositioned.
   const _metricsKey=[map.id, map.rootId, map.color, mapStyle, map.layout,
     document.documentElement.getAttribute('data-look')||'office', _fontEpoch, linkFaviconsEnabled()?'fav':'nofav',
-    JSON.stringify(map.styleConfig||{}), JSON.stringify(map.lookConfig||{})].join('|');
+    JSON.stringify(map.styleConfig||{}), JSON.stringify(map.lookConfig||{}), resolvedThemeSize(map)].join('|');
   const _seen=new Set();
   // DOM order follows map.nodes, which decides stacking when two nodes overlap.
   // Unchanged elements used to be re-appended on EVERY render - a DOM move per
@@ -4595,10 +4598,16 @@ function pushHistory(){
   if(mdMode && !_mdSyncing) syncTextFromMap();                // keep the Markdown editor in sync with canvas edits
 }
 function updateUndo(){ $('#undo').disabled=hpos<=0; $('#redo').disabled=hpos>=history.length-1; }
-function restore(s){ const o=JSON.parse(s); map.nodes=o.nodes; map.rootId=o.rootId; map.title=o.title; map.color=o.color; if(o.links) map.links=o.links; if(o.layout) map.layout=o.layout; if(o.vars) map.vars=o.vars;
+function restore(s){ const o=JSON.parse(s); const _prevThemeSize=map.themeSize; map.nodes=o.nodes; map.rootId=o.rootId; map.title=o.title; map.color=o.color; if(o.links) map.links=o.links; if(o.layout) map.layout=o.layout; if(o.vars) map.vars=o.vars;
   // Absent in the snapshot means absent on the map: a setting the user had just
   // added must go away on undo, so these are assigned, not guarded.
   map.style=o.style; map.themeSize=o.themeSize; map.layoutPreset=o.layoutPreset; map.layoutConfig=o.layoutConfig; map.styleConfig=o.styleConfig; map.lookConfig=o.lookConfig; map.themeConfig=o.themeConfig;
+  // A theme-size change also changes node padding, so invalidate the cached
+  // w/h. autoLayout() re-renders and re-measures before it reads them, instead
+  // of laying out from the previous padding's sizes and overlapping cards.
+  if((map.themeSize||'')!==(_prevThemeSize||'')){
+    for(const id in map.nodes){ const n=map.nodes[id]; if(n){ n.w=0; n.h=0; } }
+  }
   $('#mapTitle').value=map.title; autoLayout(); if(mdMode && !_mdSyncing) syncTextFromMap(); }
 function undo(){ if(hpos>0){hpos--;restore(history[hpos]);updateUndo();} }
 function redo(){ if(hpos<history.length-1){hpos++;restore(history[hpos]);updateUndo();} }
@@ -11335,14 +11344,19 @@ async function exportPNG(){
       ctx.fillText(isRoot?'▌':'>', n.x+6, n.y+h/2);
       ctx.restore();
     }
-    // Padding per style: use styleConfig cardPad if set, else per-style defaults
+    // Padding per style: use styleConfig cardPad if set, else per-style defaults.
+    // The theme size scales the live CSS padding, so the export has to scale its
+    // insets by the same factor or text wraps differently from the canvas.
     const _cp = _styleCfg ? _styleCfg.cardPad : 0;
+    const _padScale = themeSizeScale(map);
     const insetX = (() => {
-      if(mapStyle==='terminal') return isRoot ? 20 : 16;   // leave room for the > / ▌ cursor prefix
-      if(mapStyle==='paper') return Math.max(18, _cp || 15);   // clears the punch-hole strip and margin rule
-      if(_cp > 0) return isRoot ? _cp + 12 : _cp;
-      if(mapStyle==='bubble') return isRoot ? 26 : 22;
-      return isRoot ? 22 : 15;
+      let base;
+      if(mapStyle==='terminal') base = isRoot ? 20 : 16;   // leave room for the > / ▸ cursor prefix
+      else if(mapStyle==='paper') return Math.max(18, Math.max(18, _cp || 15) * _padScale);   // clears the punch-hole strip and margin rule
+      else if(_cp > 0) base = isRoot ? _cp + 12 : _cp;
+      else if(mapStyle==='bubble') base = isRoot ? 26 : 22;
+      else base = isRoot ? 22 : 15;
+      return base * _padScale;
     })();
     // Node image - drawn first, at the top, so text/checkbox center in the space below it
     let imgDrawH = 0;
@@ -11350,13 +11364,14 @@ async function exportPNG(){
     if(img){
       const contentW = w - insetX*2;
       imgDrawH = Math.min(280, contentW * (img.naturalHeight/img.naturalWidth || 1));
-      const imgY = n.y + (isRoot?14:10);
+      const imgTop = (isRoot?14:10) * _padScale;
+      const imgY = n.y + imgTop;
       ctx.save();
       roundRect(ctx, n.x+insetX, imgY, contentW, imgDrawH, 8);
       ctx.clip();
       ctx.drawImage(img, n.x+insetX, imgY, contentW, imgDrawH);
       ctx.restore();
-      imgDrawH += (isRoot?14:10)+6;   // top offset + the CSS's 6px margin-bottom, so text centers below it correctly
+      imgDrawH += imgTop + 6;   // top offset + the CSS's 6px margin-bottom, so text centers below it correctly
     }
     // Formula / frontmatter badges - match live ::before pseudo-elements
     if(_isFormula){
@@ -12684,6 +12699,12 @@ function applyStyleConfigVars(){
   vp.style.setProperty('--node-radius', cfg.radius + 'px');
   vp.style.setProperty('--node-pad-x', cfg.cardPad ? cfg.cardPad + 'px' : null);
   vp.style.setProperty('--node-pad-y', cfg.cardPad ? cfg.cardPad + 'px' : null);
+  // Theme size scales the card's inner padding as well as the gaps between
+  // cards (autoLayout). The CSS multiplies each style's own padding default by
+  // this factor, so bubble's root offset, paper's punch-hole strip and the
+  // terminal's fixed chrome all scale with it. L is 1, leaving every existing
+  // map's padding byte-identical.
+  vp.style.setProperty('--theme-pad-scale', String(themeSizeScale(map)));
   vp.style.setProperty('--node-glow', cfg.glow + 'px');
 }
 // Per-look tunables, keyed by look id on the map as map.lookConfig - the
@@ -14992,6 +15013,9 @@ $('#themeBtn').onclick=(e)=>{
       if(!THEME_SIZES.some(s=>s.id===id)) return;
       if(id===THEME_SIZE_DEFAULT) delete map.themeSize; else map.themeSize=id;
       pushHistory();
+      // Theme size changes card padding as well as spacing, so the elements
+      // must be rebuilt and re-measured before autoLayout reads their w/h.
+      render();
       autoLayout();
       themePanel.querySelectorAll('.scale-opt[data-size]').forEach(o=>o.classList.remove('active'));
       opt.classList.add('active');
@@ -16960,6 +16984,7 @@ const Collab = (function(){
   function applySnapshot(s){
     applying=true;
     try{
+      const _prevThemeSize=resolvedThemeSize(map);
       map.nodes=clone(s.nodes||{}); if(s.rootId) map.rootId=s.rootId;
       if(s.title!=null){ map.title=s.title; const t=$('#mapTitle'); if(t) t.value=s.title; }
       if(s.color) map.color=s.color;
@@ -16970,6 +16995,9 @@ const Collab = (function(){
       if(s.vars)  map.vars=clone(s.vars);
       if('style' in s) map.style=s.style;
       shadow=snap();
+      // Theme size changes node padding, so rebuild/re-measure before the
+      // layout reads w/h - otherwise the joiner lays out from stale card sizes.
+      if(resolvedThemeSize(map)!==_prevThemeSize) render();
       if(typeof autoLayout==='function') autoLayout();
       render();
       if(firstSnap && typeof fit==='function'){ fit(); firstSnap=false; }
@@ -16980,10 +17008,16 @@ const Collab = (function(){
     applying=true;
     try{
       const title=map.title;
+      const _prevThemeSize=resolvedThemeSize(map);
       applyCollabOps(map, ops);
       if(sel && !map.nodes[sel]) sel=null;
       if(map.title!==title){ const t=$('#mapTitle'); if(t) t.value=map.title; }
-      shadow=snap(); render();
+      shadow=snap();
+      if(resolvedThemeSize(map)!==_prevThemeSize){
+        // A peer changed the theme size: space the cards with their new
+        // padding, not just their old positions.
+        render(); autoLayout(); shadow=snap();
+      } else render();
     } finally { applying=false; }    // same guarantee - a malformed op or a render() edge case must not permanently wedge sync
     if(map && !map._ephemeral && !READONLY) scheduleSave();   // host persists collaborators' edits
   }
@@ -17371,6 +17405,7 @@ function cloudDiff(base, cur){
 function adoptCloudMerged(merged){
   if(!merged || typeof merged!=='object') return;
   const selId = sel && sel.id;
+  const _prevThemeSize=resolvedThemeSize(map);
   map.nodes = merged.nodes||{};
   map.links = merged.links||[];
   if(merged.title!=null) map.title=merged.title;
@@ -17384,7 +17419,8 @@ function adoptCloudMerged(merged){
   if(merged.vars) map.vars=merged.vars;
   sel = (selId && map.nodes[selId]) ? map.nodes[selId] : null;
   if($('#mapTitle')) $('#mapTitle').value=map.title;
-  render();
+  if(resolvedThemeSize(map)!==_prevThemeSize){ render(); autoLayout(); }
+  else render();
 }
 let _cloudSaveTimer=0, _cloudPollTimer=0, _cloudPollSig='';
 // Perform the cloud save (diff -> PATCH -> adopt merged). Separated so a map switch
