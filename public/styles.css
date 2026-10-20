@@ -5125,6 +5125,37 @@ input, textarea, select{
 .user-look-radius .search-wrap{ border-radius:var(--look-radius) !important; }
 
 /* ============================================================
+   Published links (/public/<guid>): the publish popup and the page shown when
+   the link no longer resolves. The popup reuses the .var-form/.vf-card shell.
+   ============================================================ */
+.publish-pop .vf-card input.vf-input{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12.5px; color:var(--ink-soft);
+}
+.publish-pop .vf-actions{ justify-content:space-between; }
+.publish-pop .vf-unpublish{ color:#b23b2e; border-color:rgba(178,59,46,.4); }
+.publish-pop .vf-unpublish:hover{ background:rgba(178,59,46,.08); }
+.public-missing{
+  position:fixed; inset:0; z-index:5000;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--paper); font-family:var(--sans); padding:20px;
+}
+.public-missing .pm-card{
+  background:var(--node-bg,#fff); color:var(--ink);
+  border-radius:16px; border:1px solid var(--chrome-edge);
+  box-shadow:0 22px 70px rgba(0,0,0,.25), 0 1px 3px rgba(0,0,0,.06);
+  padding:32px 36px; width:440px; max-width:92vw; text-align:center;
+}
+.public-missing h1{ font-family:var(--serif); font-weight:700; font-size:24px; margin:0 0 10px; }
+.public-missing p{ color:var(--ink-soft); margin:0 0 18px; line-height:1.55; font-size:14px; }
+.public-missing .pm-home{
+  display:inline-block; padding:9px 18px; border-radius:8px;
+  background:var(--accent); color:var(--accent-fg,#fff);
+  text-decoration:none; font-weight:600; font-size:14px;
+}
+.public-missing .pm-home:hover{ opacity:.9; }
+
+/* ============================================================
    Self-hosted sign-in + admin (no git host, no OAuth).
    `.server-mode` on #loginOverlay hides every cloud-only control so the card
    shows just the username/password pane.

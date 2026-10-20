@@ -41,6 +41,12 @@
 // still finds its own API. Every other app URL (./sw.js, ./styles.css) is
 // already relative; these were the only absolute ones, and they made such an
 // instance boot in cloud mode with a working backend underneath.
+// A published map lives at /public/<guid>, where a relative URL would otherwise
+// resolve under /public/. Pin the document base to the app root before anything
+// calls appUrl() - a dynamically inserted <base> updates document.baseURI.
+if(/^\/public\/[\w-]+\/?$/.test(location.pathname)){
+  const _base=document.createElement('base'); _base.href='/'; document.head.prepend(_base);
+}
 const appUrl = path => new URL(path, document.baseURI).href;
 const ServerStore = {
   // A 401 means the session is gone (expired or revoked). Tell the app so it can
@@ -81,7 +87,11 @@ const ServerStore = {
   async logout(){ try{ await fetch(appUrl('api/auth/logout'),{method:'POST'}); }catch(e){} },
   // --- admin ---
   async listUsers(){ return await this._j('api/admin/users'); },
-  async addUser(u){ return await this._j('api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)}); }
+  async addUser(u){ return await this._j('api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(u)}); },
+  // --- publish (anonymous read-only link) ---
+  async publishStatus(id){ return await this._j('api/maps/'+id+'/publish'); },
+  async publish(id){ return await this._j('api/maps/'+id+'/publish',{method:'POST'}); },
+  async unpublish(id){ return await this._j('api/maps/'+id+'/publish',{method:'DELETE'}); }
 };
 
 /* ------------------------------------------------------------
@@ -1764,7 +1774,10 @@ function render(){
     if(hasKids){
       el.appendChild(mkHandle(
         'h-collapse'+(n.collapsed?' collapsed':''),
-        n.collapsed?'+':'−',
+        // Disclosure chevrons, not +/-: the collapsed state used to render the
+        // same '+' as the add-child and add-sibling handles sitting right next
+        // to it, so "expand" was easy to mistake for "add sibling".
+        n.collapsed?'▸':'▾',
         n.collapsed?`Expand (${roll.desc[id]} hidden)`:'Collapse',
         // Looked up by id at click time, never through the `n` this element was
         // built from: the element outlives that object. Undo/redo, Markdown-mode
@@ -6066,7 +6079,7 @@ function positionNodeBar(){
     <div class="nb-group">
       <button data-a="child" title="Add child (Tab)">＋</button>
       ${!isRoot?'<button data-a="sibling" title="Add sibling (Enter)">⤵</button>':''}
-      ${hasKids?`<button data-a="collapse" title="Collapse/expand (Space)">${map.nodes[sel].collapsed?'⊕':'⊖'}</button>`:''}
+      ${hasKids?`<button data-a="collapse" title="Collapse/expand (Space)">${map.nodes[sel].collapsed?'▸':'▾'}</button>`:''}
       <button data-a="edit" title="Edit (F2)">✎</button>
       <button data-a="notes" class="${(n.notes||'').trim()?'on':''}" title="${(n.notes||'').trim()?'Edit notes':'Add notes'}">📝</button>
       <button data-a="task" class="${n.task?'on':''}" title="Task state (todo / doing / done)">☑</button>
@@ -6239,6 +6252,8 @@ function isDescendant(id, ancestorId){
 // Find the node under (x,y) that's a valid drop target for the currently-dragged node.
 function findDropTarget(x,y){
   if(!dragNode) return null;
+  const drag=map.nodes[dragNode];
+  if(!drag) return null;
   // The dragged node has pointer-events disabled during drag, so it won't be returned here.
   const els=document.elementsFromPoint(x,y);
   for(const el of els){
@@ -6248,20 +6263,90 @@ function findDropTarget(x,y){
       if(tid===dragNode) continue;
       // Don't allow dropping a node onto its own subtree (would create a cycle)
       if(isDescendant(tid, dragNode)) continue;
+      const r=node.getBoundingClientRect();
+      const rel=(y-r.top)/(r.height||1);
+      // Dropping back on the current parent is a reorder, not a no-op: this is
+      // where "drag it to the left/right of the parent" lands, and reparent()
+      // would otherwise return false and autoLayout() would snap it back. Only
+      // the middle band is treated this way for horizontal layouts, so the
+      // parent's top/bottom edge keeps its existing "insert between the
+      // parent's own siblings" meaning.
+      if(tid===drag.parent){
+        const layout=map.layout||'balanced';
+        const horiz=layout==='balanced'||layout==='right'||layout==='left';
+        if(horiz && rel>=0.30 && rel<=0.70) return siblingInsertTarget(x,y);
+      }
       // Hovering the centre of a node nests as a child; hovering its top/bottom
       // edge inserts as a sibling before/after it (reorder). Root only accepts
       // nesting (it has no siblings).
       let mode='on';
       if(tid!==map.rootId){
-        const r=node.getBoundingClientRect();
-        const rel=(y-r.top)/(r.height||1);
         if(rel<0.30) mode='before';
         else if(rel>0.70) mode='after';
       }
       return {id:tid, mode};
     }
   }
-  return null;
+  // Not over a node at all: fall back to the nearest sibling slot under the
+  // dragged node's own parent. Without this, releasing in the gap between two
+  // siblings looked like "cancel" and autoLayout() snapped the node back to the
+  // exact position it started from.
+  return siblingInsertTarget(x,y);
+}
+// Empty-canvas drop fallback: pick the sibling slot nearest the pointer.
+// Keeps the node under its current parent (the user asked for reordering, not
+// arbitrary reparenting), but a direct child of the root in the balanced layout
+// may switch between the left and right columns when dropped across the root.
+function siblingInsertTarget(x,y){
+  const drag = dragNode && map.nodes[dragNode];
+  if(!drag || drag.parent==null || !dragStart) return null;
+  // A click with a tiny hand tremor should stay a click, not reorder the tree.
+  if(Math.hypot(x-dragStart.mx, y-dragStart.my) < 10) return null;
+  const parentId=drag.parent;
+  const parent=map.nodes[parentId];
+  if(!parent) return null;
+  const layout=map.layout||'balanced';
+  if(!TREE_LAYOUTS[layout]) return null;   // radial/grid/matrix have no linear sibling slots
+  const horiz = layout==='balanced' || layout==='right' || layout==='left';
+
+  // Only direct children of the root pick a side; deeper children inherit their
+  // parent's side and always stack in one column.
+  let side=drag.side;
+  if(parentId===map.rootId && layout==='balanced'){
+    const pr=document.querySelector(`.node[data-id="${parentId}"]`)?.getBoundingClientRect();
+    if(pr) side = x < pr.left + pr.width/2 ? 'left' : 'right';
+  }
+
+  const sibs=childrenOf(parentId).filter(id=>{
+    if(id===dragNode) return false;
+    return parentId!==map.rootId || map.nodes[id].side===side;
+  });
+  if(!sibs.length){
+    // The chosen side of the root is still empty: there is no sibling to anchor
+    // insertSibling(), so drop into that column as its first child.
+    if(parentId===map.rootId && layout==='balanced'){
+      return { id:parentId, mode:'slot', parentId, side, beforeId:null };
+    }
+    return null;
+  }
+
+  // Nearest sibling by on-screen centre. Using the DOM rect keeps this in the
+  // same coordinate space as the pointer, with no manual view transform.
+  let best=null, bestD=Infinity, bestRect=null;
+  for(const id of sibs){
+    const r=document.querySelector(`.node[data-id="${id}"]`)?.getBoundingClientRect();
+    if(!r) continue;
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    const d=(cx-x)*(cx-x)+(cy-y)*(cy-y);
+    if(d<bestD){ bestD=d; best=id; bestRect=r; }
+  }
+  if(!best) return null;
+  // Horizontal layouts stack siblings vertically; vertical layouts stack them
+  // horizontally. Insert before/after according to which half was dropped on.
+  const before = horiz
+    ? y < bestRect.top + bestRect.height/2
+    : x < bestRect.left + bestRect.width/2;
+  return { id:best, mode:before?'before':'after' };
 }
 function setDropTarget(dt){
   const id=dt&&dt.id, mode=(dt&&dt.mode)||'on';
@@ -6271,7 +6356,7 @@ function setDropTarget(dt){
   dropTarget=dt||null;
   if(id){
     const el=document.querySelector(`.node[data-id="${id}"]`);
-    if(el) el.classList.add(mode==='on'?'drop-target':(mode==='before'?'drop-before':'drop-after'));
+    if(el) el.classList.add((mode==='on'||mode==='slot')?'drop-target':(mode==='before'?'drop-before':'drop-after'));
   }
 }
 // Insert `dragId` as a sibling of `refId`, immediately before or after it,
@@ -6294,6 +6379,31 @@ function insertSibling(dragId, refId, mode){
     if(k===refId && mode==='before') reordered[dragId]=drag;
     reordered[k]=map.nodes[k];
     if(k===refId && mode==='after') reordered[dragId]=drag;
+  }
+  if(!reordered[dragId]) reordered[dragId]=drag;
+  map.nodes=reordered;
+  pushHistory(); autoLayout();
+  return true;
+}
+// Insert `dragId` as a child of `parentId` on `side`, immediately before
+// `beforeId` (or last when beforeId is null). Unlike insertSibling() this needs
+// no existing sibling, which is what lets a node be dropped into an empty
+// left/right column of the root.
+function insertUnderParent(dragId, parentId, side, beforeId){
+  if(dragId===map.rootId || dragId===parentId) return false;
+  const drag=map.nodes[dragId];
+  if(!drag || !map.nodes[parentId]) return false;
+  if(isDescendant(parentId, dragId)) return false;   // can't drop into own subtree
+  drag.parent=parentId;
+  const propagate=(id,sd)=>{ map.nodes[id].side=sd; childrenOf(id).forEach(c=>propagate(c,sd)); };
+  withChildIndex(()=>propagate(dragId, side));
+  // Sibling order is map.nodes key order; re-insert dragId at the requested
+  // position so buildChildIndex() hands the layout the new order.
+  const reordered={};
+  for(const k in map.nodes){
+    if(k===dragId) continue;
+    if(k===beforeId) reordered[dragId]=drag;
+    reordered[k]=map.nodes[k];
   }
   if(!reordered[dragId]) reordered[dragId]=drag;
   map.nodes=reordered;
@@ -6462,9 +6572,14 @@ window.addEventListener('mousemove',e=>{
   _movePt={clientX:e.clientX, clientY:e.clientY};
   if(!_moveRAF) _moveRAF=requestAnimationFrame(_applyMove);   // coalesce to one update / frame
 });
-window.addEventListener('mouseup',()=>{
+window.addEventListener('mouseup',e=>{
+  // Land on the release point, not the last mousemove: a fast drag can move a
+  // few more pixels between that event and the release, which used to pick the
+  // wrong sibling slot (or none at all).
+  if(dragNode && moved && e && typeof e.clientX==='number') _movePt={clientX:e.clientX, clientY:e.clientY};
   document.body.classList.remove('node-dragging');
-  if(_moveRAF){ cancelAnimationFrame(_moveRAF); _moveRAF=0; _applyMove(); }
+  if(_moveRAF){ cancelAnimationFrame(_moveRAF); _moveRAF=0; }
+  if(_movePt) _applyMove();
   _movePt=null; _dragHidden=null;
   if(resizing){
     resizing = null;
@@ -6488,8 +6603,10 @@ window.addEventListener('mouseup',()=>{
   }
   if(dragNode){
     if(dropTarget && dragNode!==map.rootId){
-      const did = (dropTarget.mode==='on') ? reparent(dragNode, dropTarget.id)        // nest as child
-                                           : insertSibling(dragNode, dropTarget.id, dropTarget.mode); // reorder / insert between
+      const did = dropTarget.mode==='slot'
+        ? insertUnderParent(dragNode, dropTarget.parentId, dropTarget.side, dropTarget.beforeId) // first child in an empty root column
+        : (dropTarget.mode==='on') ? reparent(dragNode, dropTarget.id)        // nest as child
+                                   : insertSibling(dragNode, dropTarget.id, dropTarget.mode); // reorder / insert between
       // No-op drop (e.g. dropped back onto its current parent): the drag left the
       // node at the drop position, so tidy it back into place instead of overlapping.
       if(!did && moved){ autoLayout(); }
@@ -6583,13 +6700,18 @@ window.addEventListener('touchend', e=>{
   const remaining = e.touches ? e.touches.length : 0;
   if(pinch && remaining<2){ pinch=null; }
   if(remaining>0) return;              // still touching
+  const t=e.changedTouches?.[0];
+  if(dragNode && moved && t) _movePt={clientX:t.clientX, clientY:t.clientY};
   document.body.classList.remove('node-dragging');
-  if(_moveRAF){ cancelAnimationFrame(_moveRAF); _moveRAF=0; _applyMove(); }
+  if(_moveRAF){ cancelAnimationFrame(_moveRAF); _moveRAF=0; }
+  if(_movePt) _applyMove();
   _movePt=null; _dragHidden=null;
   if(dragNode){
     if(dropTarget && dragNode!==map.rootId){
-      const did = (dropTarget.mode==='on') ? reparent(dragNode, dropTarget.id)
-                                           : insertSibling(dragNode, dropTarget.id, dropTarget.mode);
+      const did = dropTarget.mode==='slot'
+        ? insertUnderParent(dragNode, dropTarget.parentId, dropTarget.side, dropTarget.beforeId)
+        : (dropTarget.mode==='on') ? reparent(dragNode, dropTarget.id)
+                                   : insertSibling(dragNode, dropTarget.id, dropTarget.mode);
       if(!did && moved){ autoLayout(); }   // snap back on a no-op drop
     }
     else if(moved){ autoLayout(); pushHistory(); }
@@ -16186,6 +16308,7 @@ function showServerLoginPane(opts){
       ServerStore.onUnauthorized=handleServerSignOut;
       ov.style.display='none';
       showUserPill();
+      initPublishButton();
       await proceedBoot();
     }catch(e){
       err.textContent = (e && e.status===401) ? 'Wrong username or password.' : 'Could not sign in - is the server running?';
@@ -16205,6 +16328,7 @@ function showServerLoginPane(opts){
 function handleServerSignOut(){
   CURRENT_USER=null;
   hideUserPill();
+  const pb=$('#publishBtn'); if(pb) pb.style.display='none';
   showLoginOverlay({ expired:true });
 }
 
@@ -16532,19 +16656,63 @@ async function tryEnterSharedView(){
   window.addEventListener('load', ()=>{ autoLayout(); fit(); }, { once:true });
   return true;
 }
+// A published link (/public/<guid>): fetch the map anonymously and render the
+// same read-only view as a #view= link. No store, no login, no account needed.
+async function tryEnterPublicView(){
+  const m=(location.pathname||'').match(/^\/public\/([\w-]+)\/?$/);
+  if(!m) return false;
+  let payload;
+  try{
+    const r=await fetch(appUrl('api/public/'+encodeURIComponent(m[1])),{cache:'no-store'});
+    if(!r.ok) throw new Error(String(r.status));
+    payload=await r.json();
+  }catch(e){
+    showPublicMissing();
+    return true;
+  }
+  if(!payload || !payload.nodes){ showPublicMissing(); return true; }
+  READONLY=true;
+  document.body.classList.add('shared-view');
+  map=sanitizeMapData({ id:'shared', title:payload.title||'Published map', color:payload.color||'#e0613a',
+        style:payload.style, layout:payload.layout, rootId:payload.rootId,
+        nodes:payload.nodes||{}, links:payload.links||[], vars:payload.vars||{},
+        layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
+  sel=null;
+  $('#mapTitle').value=map.title; $('#mapTitle').readOnly=true;
+  $('#mapTitle').size=Math.max(8,(map.title||'').length+1);
+  render();
+  showSharedBanner();
+  let tries=0;
+  const settle=()=>{
+    if(stage.getBoundingClientRect().width>1){ autoLayout(); fit(); }
+    else if(tries++<60){ requestAnimationFrame(settle); }
+  };
+  requestAnimationFrame(settle);
+  window.addEventListener('load', ()=>{ autoLayout(); fit(); }, { once:true });
+  return true;
+}
+function showPublicMissing(){
+  document.body.classList.add('shared-view');
+  const d=document.createElement('div'); d.className='public-missing';
+  d.innerHTML=`<div class="pm-card">
+    <h1>Map not available</h1>
+    <p>This published map was removed, or the link doesn't match one.</p>
+    <a class="pm-home" href="${document.baseURI}">Open MindSpark</a></div>`;
+  document.body.appendChild(d);
+}
 function showSharedBanner(){
   if($('#sharedBanner')) return;
   const b=document.createElement('div'); b.id='sharedBanner'; b.className='shared-banner';
   b.innerHTML=`<span class="sb-eye">👁</span>
     <span class="sb-text">You're viewing a shared map - <b>read-only</b></span>
     <button class="sb-copy" id="sbCopy">Make an editable copy</button>
-    <a class="sb-brand" href="${location.origin+location.pathname}" title="Open MindSpark">MindSpark</a>`;
+    <a class="sb-brand" href="${document.baseURI}" title="Open MindSpark">MindSpark</a>`;
   document.body.appendChild(b);
   _setBannerHeightVar(b);
   b.addEventListener('mousedown',e=>e.stopPropagation());
   $('#sbCopy').onclick=()=>{
     try{ sessionStorage.setItem('mindspark:pendingImport', JSON.stringify(_shareePayload(map))); }catch(e){}
-    location.href = location.origin + location.pathname;
+    location.href = document.baseURI;
   };
 }
 async function consumePendingImport(){
@@ -16564,6 +16732,67 @@ async function consumePendingImport(){
   refreshList();
   toast('Editable copy created');
   return true;
+}
+
+/* ============================================================
+   Publish - a stable /public/<guid> link (self-hosted server only).
+   Unlike #view=, the map is not encoded in the URL: the server stores a
+   GUID -> map mapping and the link always shows the map's current state.
+   ============================================================ */
+function initPublishButton(){
+  const btn=$('#publishBtn'); if(!btn) return;
+  btn.style.display=(MODE==='server' && !READONLY) ? '' : 'none';
+  btn.onclick=(e)=>{ e.stopPropagation(); publishCurrentMap(); };
+}
+async function publishCurrentMap(){
+  if(!map || READONLY) return;
+  if(MODE!=='server'){ toast('Publishing needs the self-hosted server'); return; }
+  // The link resolves to a stored map, so make sure the current one exists there.
+  try{ await Store.save(map); }
+  catch(e){ toast('Could not save the map before publishing'); return; }
+  try{
+    const res=await ServerStore.publish(map.id);
+    showPublishPopup(res.url);
+  }catch(e){
+    toast(e && e.message==='401' ? 'Please sign in again' : 'Could not publish this map');
+  }
+}
+function showPublishPopup(url){
+  document.querySelectorAll('.publish-pop').forEach(p=>p.remove());
+  const m=document.createElement('div'); m.className='var-form publish-pop';
+  m.innerHTML=`<div class="vf-backdrop"></div><div class="vf-card">
+    <button class="vf-close">×</button>
+    <h2>Published</h2>
+    <p class="vf-sub">Anyone with this link can view the map read-only - no account needed. Edits you save appear on the link; unpublishing revokes it.</p>
+    <input class="vf-input" readonly value="${escapeHtml(url)}" style="width:100%" />
+    <div class="vf-actions">
+      <button class="vf-go primary">Copy link</button>
+      <button class="vf-unpublish">Unpublish</button>
+    </div></div>`;
+  document.body.appendChild(m);
+  m.addEventListener('mousedown',e=>e.stopPropagation());
+  const input=m.querySelector('input');
+  const close=()=>m.remove();
+  const fallbackCopy=()=>{
+    try{ input.focus(); input.select(); document.execCommand('copy'); toast('Link copied'); }
+    catch(e){ toast('Select the link and copy it'); }
+  };
+  const copy=()=>{
+    try{ input.focus(); input.select(); }catch(e){}
+    if(navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(()=>toast('Link copied'), fallbackCopy);
+    else fallbackCopy();
+  };
+  m.querySelector('.vf-go').onclick=copy;
+  m.querySelector('.vf-close').onclick=close;
+  m.querySelector('.vf-backdrop').onclick=close;
+  m.querySelector('.vf-unpublish').onclick=async()=>{
+    try{
+      await ServerStore.unpublish(map.id);
+      close();
+      toast('Publication removed - the link no longer works');
+    }catch(e){ toast('Could not unpublish'); }
+  };
+  try{ input.focus(); input.select(); }catch(e){}
 }
 
 /* ============================================================================
@@ -17572,6 +17801,7 @@ else loadQotd();
   // Read-only shared link? Decode and render a view-only map - no store, no
   // login, no account needed by the recipient.
   if(await tryEnterLiveSession()) return;
+  if(await tryEnterPublicView()) return;
   if(await tryEnterSharedView()) return;
   // A #shared= link: if you're signed in, boot your app first (so "Your maps" + the
   // "Shared with me" library are loaded) and open the shared map IN-PLACE. If you're
@@ -17589,6 +17819,7 @@ else loadQotd();
     if(loggedIn){
       ServerStore.onUnauthorized=handleServerSignOut;
       showUserPill();
+      initPublishButton();
       await proceedBoot(); await _openSharedAfterBoot();
     } else {
       showLoginOverlay();

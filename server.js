@@ -181,6 +181,31 @@ db.exec(MAP_TABLES);
 // old index, and an IF NOT EXISTS index of the same name would then be a no-op.
 db.exec('CREATE INDEX IF NOT EXISTS idx_versions_id ON map_versions (owner_id, id, ts DESC)');
 
+// Published links: an unguessable GUID -> one owned map. No copy of the map is
+// stored here - the public view reads the live `maps` row, so edits show up on
+// the link immediately and unpublishing is a single DELETE.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS publications (
+    guid     TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    map_id   TEXT NOT NULL,
+    created  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_publications_map ON publications (owner_id, map_id);
+`);
+
+// The anonymous public view gets the same fields a #view= link carries - never
+// owner bookkeeping or internal scratch keys.
+function publicMapPayload(dataStr) {
+  let m; try { m = JSON.parse(dataStr); } catch (e) { return null; }
+  if (!m || typeof m !== 'object') return null;
+  const out = { v: 1, title: m.title, color: m.color, style: m.style, layout: m.layout,
+                rootId: m.rootId, nodes: m.nodes || {}, links: m.links || [], vars: m.vars || {} };
+  for (const k of ['layoutConfig', 'styleConfig', 'lookConfig', 'themeConfig'])
+    if (m[k] !== undefined) out[k] = m[k];
+  return out;
+}
+
 const Q = {
   list:   db.prepare('SELECT id, title, color, updated FROM maps WHERE owner_id = ? ORDER BY updated DESC'),
   get:    db.prepare('SELECT data FROM maps WHERE owner_id = ? AND id = ?'),
@@ -196,6 +221,12 @@ const Q = {
   vGet:    db.prepare('SELECT data FROM map_versions WHERE owner_id = ? AND id = ? AND ts = ?'),
   vDelOld: db.prepare('DELETE FROM map_versions WHERE owner_id = ? AND id = ? AND ts NOT IN (SELECT ts FROM map_versions WHERE owner_id = ? AND id = ? ORDER BY ts DESC LIMIT 50)'),
   vDelAll: db.prepare('DELETE FROM map_versions WHERE owner_id = ? AND id = ?'),
+  // publications (anonymous read-only links)
+  pubByGuid:  db.prepare('SELECT owner_id AS ownerId, map_id AS mapId FROM publications WHERE guid = ?'),
+  pubForMap:  db.prepare('SELECT guid FROM publications WHERE owner_id = ? AND map_id = ? ORDER BY created ASC LIMIT 1'),
+  pubInsert:  db.prepare('INSERT INTO publications (guid, owner_id, map_id, created) VALUES (?,?,?,?)'),
+  pubDelMap:  db.prepare('DELETE FROM publications WHERE owner_id = ? AND map_id = ?'),
+  pubDelGuid: db.prepare('DELETE FROM publications WHERE guid = ? AND owner_id = ?'),
   // users / sessions
   userByName: db.prepare('SELECT * FROM users WHERE username = ?'),
   userById:   db.prepare('SELECT id, username, role, disabled FROM users WHERE id = ?'),
@@ -572,7 +603,7 @@ const server = http.createServer(async (req, res) => {
         m.id = id; upsert(m, u.id);
         return send(res, 200, { ok: true, id });
       }
-      if (req.method === 'DELETE') { Q.del.run(u.id, id); Q.vDelAll.run(u.id, id); res.writeHead(204); return res.end(); }
+      if (req.method === 'DELETE') { Q.del.run(u.id, id); Q.vDelAll.run(u.id, id); Q.pubDelMap.run(u.id, id); res.writeHead(204); return res.end(); }
     }
 
     // ----- version history -----
@@ -589,11 +620,55 @@ const server = http.createServer(async (req, res) => {
       return row ? send(res, 200, row.data, 'application/json') : send(res, 404, { error: 'not found' });
     }
 
+    // ----- published (anonymous read-only) links -----
+    // Publishing is idempotent: a map keeps the same GUID until it is unpublished,
+    // so re-opening the dialog never mints a second link.
+    const pubMatch = p.match(/^\/api\/maps\/([\w-]+)\/publish$/);
+    if (pubMatch) {
+      const u = requireAuth(req, res); if (!u) return;
+      const id = pubMatch[1];
+      if (!Q.ownsMap.get(u.id, id)) return send(res, 404, { error: 'not found' });
+      const proto = req.headers['x-forwarded-proto'] || 'http';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT);
+      const urlOf = (guid) => `${proto}://${host}/public/${guid}`;
+      if (req.method === 'GET') {
+        const row = Q.pubForMap.get(u.id, id);
+        return send(res, 200, row
+          ? { published: true, guid: row.guid, url: urlOf(row.guid) }
+          : { published: false });
+      }
+      if (req.method === 'POST') {
+        let row = Q.pubForMap.get(u.id, id);
+        if (!row) { const guid = crypto.randomUUID(); Q.pubInsert.run(guid, u.id, id, Date.now()); row = { guid }; }
+        return send(res, 200, { guid: row.guid, url: urlOf(row.guid) });
+      }
+      if (req.method === 'DELETE') {
+        const row = Q.pubForMap.get(u.id, id);
+        if (row) Q.pubDelGuid.run(row.guid, u.id);
+        res.writeHead(204); return res.end();
+      }
+    }
+
+    // The published map itself: no auth. The unguessable GUID is the capability,
+    // and the row is resolved against the live map on every request.
+    const pubGet = p.match(/^\/api\/public\/([\w-]+)$/);
+    if (pubGet && req.method === 'GET') {
+      const row = Q.pubByGuid.get(pubGet[1]);
+      const m = row && Q.get.get(row.ownerId, row.mapId);
+      const payload = m ? publicMapPayload(m.data) : null;
+      if (!payload) return send(res, 404, { error: 'not found' });
+      res.setHeader('Cache-Control', 'no-cache');
+      return send(res, 200, payload, 'application/json');
+    }
+
     // Public: the deployment-mode probe the client uses before it knows anything.
     if (p === '/healthz') return send(res, 200, { ok: true });
 
     // ----- static files -----
-    let file = p === '/' ? '/index.html' : p;
+    // A published link (/public/<guid>) is an SPA page: serve the app shell, which
+    // reads the GUID from location.pathname and fetches /api/public/<guid>.
+    const pubPage = p.match(/^\/public\/[\w-]+\/?$/);
+    let file = (p === '/' || (pubPage && req.method === 'GET')) ? '/index.html' : p;
     const full = path.join(PUBLIC, path.normalize(file).replace(/^(\.\.[/\\])+/, ''));
     // Prefix check with a trailing separator so a sibling directory like
     // "<PUBLIC>-evil" can never satisfy the check (defense in depth).
