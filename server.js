@@ -201,7 +201,7 @@ function publicMapPayload(dataStr) {
   if (!m || typeof m !== 'object') return null;
   const out = { v: 1, title: m.title, color: m.color, style: m.style, layout: m.layout,
                 rootId: m.rootId, nodes: m.nodes || {}, links: m.links || [], vars: m.vars || {} };
-  for (const k of ['layoutConfig', 'styleConfig', 'lookConfig', 'themeConfig'])
+  for (const k of ['themeSize', 'layoutConfig', 'styleConfig', 'lookConfig', 'themeConfig'])
     if (m[k] !== undefined) out[k] = m[k];
   return out;
 }

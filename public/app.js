@@ -2661,14 +2661,25 @@ function buildEdgeLabels(hidden, layout){
 }
 function edgePath(x1,y1,x2,y2,leftSide,horizontal,style){
   switch(style){
-    case 'classic': {                                   // step / right-angle elbow
+    case 'classic': { // step / right-angle elbow, softened with a small quadratic fillet
+      // The radius is clamped to the shorter adjoining segment so a tight branch
+      // can never loop back over itself. Kept inline (not a helper) because the
+      // pure-function tests lift only edgePath() out of this browser script.
+      const R=8;
       if(horizontal){
-        const mid=(x1+x2)/2;
-        return `M${x1},${y1} L${mid},${y1} L${mid},${y2} L${x2},${y2}`;
-      } else {
-        const mid=(y1+y2)/2;
-        return `M${x1},${y1} L${x1},${mid} L${x2},${mid} L${x2},${y2}`;
+        const mid=(x1+x2)/2, dx=Math.abs(x2-x1)/2, dy=Math.abs(y2-y1);
+        if(dy < 0.5) return `M${x1},${y1} L${x2},${y2}`;
+        const sx=(x2>=x1)?1:-1, sy=(y2>=y1)?1:-1;
+        const r=Math.min(R, dx/2, dy/2);
+        if(r < 0.5) return `M${x1},${y1} L${mid},${y1} L${mid},${y2} L${x2},${y2}`;
+        return `M${x1},${y1} L${mid-sx*r},${y1} Q${mid},${y1} ${mid},${y1+sy*r} L${mid},${y2-sy*r} Q${mid},${y2} ${mid+sx*r},${y2} L${x2},${y2}`;
       }
+      const mid=(y1+y2)/2, dy=Math.abs(y2-y1)/2, dx=Math.abs(x2-x1);
+      if(dx < 0.5) return `M${x1},${y1} L${x2},${y2}`;
+      const sx=(x2>=x1)?1:-1, sy=(y2>=y1)?1:-1;
+      const r=Math.min(R, dy/2, dx/2);
+      if(r < 0.5) return `M${x1},${y1} L${x1},${mid} L${x2},${mid} L${x2},${y2}`;
+      return `M${x1},${y1} L${x1},${mid-sy*r} Q${x1},${mid} ${x1+sx*r},${mid} L${x2-sx*r},${mid} Q${x2},${mid} ${x2},${mid+sy*r} L${x2},${y2}`;
     }
     case 'sketch': return `M${x1},${y1} L${x2},${y2}`;  // straight line
     case 'zigzag': {                                     // jagged polyline
@@ -2784,6 +2795,24 @@ function hiddenSet(){
    LAYOUT - tidy tree, supports balanced / right / down
    ============================================================ */
 const HGAP=70, VGAP=22, DOWN_HGAP=38, DOWN_VGAP=70;
+// Theme size: one spacing multiplier for every layout engine. L is the existing
+// geometry (no behavioural change for maps that never pick a size); S/M/XL scale
+// the gaps, stems and indents that autoLayout feeds the placement strategies.
+const THEME_SIZES = [
+  { id:'s',  name:'S',  label:'Small',  scale:0.8  },
+  { id:'m',  name:'M',  label:'Medium', scale:0.9  },
+  { id:'l',  name:'L',  label:'Large',  scale:1    },
+  { id:'xl', name:'XL', label:'Extra large', scale:1.15 },
+];
+const THEME_SIZE_DEFAULT='l';
+function resolvedThemeSize(m){
+  const id = m && m.themeSize;
+  return THEME_SIZES.some(s=>s.id===id) ? id : THEME_SIZE_DEFAULT;
+}
+function themeSizeScale(m){
+  const id = resolvedThemeSize(m);
+  return (THEME_SIZES.find(s=>s.id===id) || THEME_SIZES[2]).scale;
+}
 
 // ===== Global overlap avoidance =====
 // Nudge overlapping nodes apart with minimum displacement, moving whole
@@ -3672,6 +3701,15 @@ function autoLayout(noRender){
       if(_cfg[k] !== undefined) _p[k] = _cfg[k];
     }
   }
+  // Theme size multiplies only the spacing knobs, never enums/angles/columns.
+  // L is 1, so existing maps keep byte-identical geometry.
+  const _sizeScale = themeSizeScale(map);
+  if(_sizeScale !== 1){
+    for(const k of ['gapMain','gapCross','gap','stem','indent','ring',
+                    'gapX','gapY','rowGap','colGap','cellGap','headGap']){
+      if(typeof _p[k] === 'number') _p[k] = Math.max(0, Math.round(_p[k] * _sizeScale));
+    }
+  }
   ({ tree: layoutTree, chain: layoutChain, radial: layoutRadial, grid: layoutGrid,
      matrix: layoutMatrix }[_run.strategy])
     (map.nodes, map.rootId, childrenOf, _p);
@@ -4541,7 +4579,7 @@ function toggleMdMode(on){
 // edit instead. restore() must put back every field listed here.
 function historySnapshot(){
   return JSON.stringify({nodes:map.nodes,rootId:map.rootId,title:map.title,color:map.color,links:map.links||[],layout:map.layout,vars:map.vars||{},
-    style:map.style, layoutPreset:map.layoutPreset, layoutConfig:map.layoutConfig, styleConfig:map.styleConfig,
+    style:map.style, themeSize:map.themeSize, layoutPreset:map.layoutPreset, layoutConfig:map.layoutConfig, styleConfig:map.styleConfig,
     lookConfig:map.lookConfig, themeConfig:map.themeConfig});
 }
 function pushHistory(){
@@ -4560,7 +4598,7 @@ function updateUndo(){ $('#undo').disabled=hpos<=0; $('#redo').disabled=hpos>=hi
 function restore(s){ const o=JSON.parse(s); map.nodes=o.nodes; map.rootId=o.rootId; map.title=o.title; map.color=o.color; if(o.links) map.links=o.links; if(o.layout) map.layout=o.layout; if(o.vars) map.vars=o.vars;
   // Absent in the snapshot means absent on the map: a setting the user had just
   // added must go away on undo, so these are assigned, not guarded.
-  map.style=o.style; map.layoutPreset=o.layoutPreset; map.layoutConfig=o.layoutConfig; map.styleConfig=o.styleConfig; map.lookConfig=o.lookConfig; map.themeConfig=o.themeConfig;
+  map.style=o.style; map.themeSize=o.themeSize; map.layoutPreset=o.layoutPreset; map.layoutConfig=o.layoutConfig; map.styleConfig=o.styleConfig; map.lookConfig=o.lookConfig; map.themeConfig=o.themeConfig;
   $('#mapTitle').value=map.title; autoLayout(); if(mdMode && !_mdSyncing) syncTextFromMap(); }
 function undo(){ if(hpos>0){hpos--;restore(history[hpos]);updateUndo();} }
 function redo(){ if(hpos<history.length-1){hpos++;restore(history[hpos]);updateUndo();} }
@@ -8069,7 +8107,7 @@ function normalizeLoadedMap(m){
            nodes:m.nodes||{}, links:m.links||[], vars:m.vars||{} };
   // Per-map settings are content too: a version restored without them came back
   // with default spacing, style, look and colours.
-  for(const k of ['layoutPreset','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter']) if(m[k]!=null) out[k]=m[k];
+  for(const k of ['themeSize','layoutPreset','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter']) if(m[k]!=null) out[k]=m[k];
   return sanitizeMapData(out);
 }
 // ---- Map ingress ------------------------------------------------------------
@@ -8107,7 +8145,7 @@ function sanitizeNodeFields(n){
 // Map-level fields a live-session peer may change. Anything else - id,
 // _ephemeral, _cloudEdit... - would let a peer point the host's autosave at a
 // different map or flip local-only state, so it is ignored.
-const COLLAB_META_KEYS = new Set(['title','color','rootId','links','layout','vars','style']);
+const COLLAB_META_KEYS = new Set(['title','color','rootId','links','layout','vars','style','themeSize']);
 // Apply a peer's ops to map m. A peer is as untrusted as a share link, so a
 // node op goes through the same field checks as a loaded map, and an id that
 // could not be a node key (__proto__, markup) is refused outright.
@@ -8132,6 +8170,7 @@ function applyCollabOps(m, ops){
       else if(op.k === 'rootId'){ if(okId(v)) m.rootId = v; }
       else if(op.k === 'links'){ if(Array.isArray(v)) m.links = v.filter(l => l && typeof l === 'object' && okId(l.from) && okId(l.to)); }
       else if(op.k === 'layout'){ if(typeof v === 'string') m.layout = v; }
+      else if(op.k === 'themeSize'){ if(['s','m','l','xl'].includes(v)) m.themeSize = v; else delete m.themeSize; }
       else m[op.k] = v;   // vars, style: trusted exactly as far as the snapshot path trusts them
     }
   }
@@ -8183,6 +8222,9 @@ const UNSAFE_NODE_IDS = new Set(['__proto__','constructor','prototype']);
 function sanitizeMapData(m){
   if(!m || typeof m !== 'object' || Array.isArray(m)) return null;
   if(!m.nodes || typeof m.nodes !== 'object' || Array.isArray(m.nodes)) m.nodes = {};
+  // Mirrors THEME_SIZES; kept literal because this sanitizer is also lifted out
+  // of the browser bundle by the pure-function tests, without its constants.
+  if(m.themeSize != null && !['s','m','l','xl'].includes(m.themeSize)) delete m.themeSize;
   m.color = safeColor(m.color) || '#e0613a';
   // Ids first, so every field that names a node below sees the final keys.
   // A prototype-less object: on a plain {} the key "__proto__" sets the
@@ -11021,17 +11063,25 @@ async function exportPNG(){
     ctx.beginPath();
     if(d!==null){
       // Reconstruct SVG path commands on canvas
-      const parts=d.split(/(?=[MLC])/); // split before each command
+      const parts=d.split(/(?=[MLCQ])/); // split before each command
       let first=true;
       for(const seg of parts){
         const c=seg[0]; const nums=seg.slice(1).trim().split(/[\s,]+/).map(Number);
         if(c==='M'){ ctx.moveTo(nums[0],nums[1]); }
         else if(c==='L'){ ctx.lineTo(nums[0],nums[1]); }
         else if(c==='C'){ ctx.bezierCurveTo(nums[0],nums[1],nums[2],nums[3],nums[4],nums[5]); }
+        else if(c==='Q'){ ctx.quadraticCurveTo(nums[0],nums[1],nums[2],nums[3]); }
       }
     } else if(mapStyle==='classic'){
-      if(horizontal){ const mid=(x1+x2)/2; ctx.moveTo(x1,y1); ctx.lineTo(mid,y1); ctx.lineTo(mid,y2); ctx.lineTo(x2,y2); }
-      else { const mid=(y1+y2)/2; ctx.moveTo(x1,y1); ctx.lineTo(x1,mid); ctx.lineTo(x2,mid); ctx.lineTo(x2,y2); }
+      // Reuse the live edge geometry so the canvas export cannot drift from SVG.
+      const d=edgePath(x1,y1,x2,y2,false,horizontal,'classic');
+      const parts=d.split(/(?=[MLCQ])/);
+      for(const seg of parts){
+        const c=seg[0]; const nums=seg.slice(1).trim().split(/[\s,]+/).map(Number);
+        if(c==='M'){ ctx.moveTo(nums[0],nums[1]); }
+        else if(c==='L'){ ctx.lineTo(nums[0],nums[1]); }
+        else if(c==='Q'){ ctx.quadraticCurveTo(nums[0],nums[1],nums[2],nums[3]); }
+      }
     } else if(mapStyle==='sketch'){
       ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
     } else if(mapStyle==='zigzag'){
@@ -14759,6 +14809,7 @@ $('#themeBtn').onclick=(e)=>{
   const curLook   = document.documentElement.getAttribute('data-look')  || 'office';
   const curStyle  = resolvedMapStyle(map);
   const curLayout = (map && (map.layoutPreset || map.layout)) || 'balanced';
+  const curSize   = resolvedThemeSize(map);
   const curUi     = document.body.classList.contains('ui-zen') ? 'zen'
                   : (document.body.classList.contains('ui-dock') ? 'dock'
                   : (document.body.classList.contains('ui-split') ? 'split'
@@ -14826,6 +14877,13 @@ $('#themeBtn').onclick=(e)=>{
           <button class="theme-opt${l.id===curLayout?' active':''}" data-cat="layout" data-id="${l.id}" title="${l.desc}">
             ${buildLayoutThumb(l.id)}<span class="theme-name">${l.name}</span>
           </button>`).join('')}
+      </div>
+    </div>
+    <div class="tp-section">
+      <div class="tp-label">Theme size <span class="tp-hint">spacing between cards</span></div>
+      <div class="tp-scale">
+        ${THEME_SIZES.map(s=>`
+          <button class="scale-opt${s.id===curSize?' active':''}" data-size="${s.id}" title="${s.label}">${s.name}</button>`).join('')}
       </div>
     </div>
     <div class="tp-section">
@@ -14926,12 +14984,25 @@ $('#themeBtn').onclick=(e)=>{
       opt.classList.add('active');
     };
   });
-  themePanel.querySelectorAll('.scale-opt').forEach(opt=>{
+  themePanel.querySelectorAll('.scale-opt[data-size]').forEach(opt=>{
+    opt.onclick=ev=>{
+      ev.stopPropagation();
+      if(!map || READONLY) return;
+      const id=opt.dataset.size;
+      if(!THEME_SIZES.some(s=>s.id===id)) return;
+      if(id===THEME_SIZE_DEFAULT) delete map.themeSize; else map.themeSize=id;
+      pushHistory();
+      autoLayout();
+      themePanel.querySelectorAll('.scale-opt[data-size]').forEach(o=>o.classList.remove('active'));
+      opt.classList.add('active');
+    };
+  });
+  themePanel.querySelectorAll('.scale-opt[data-scale]').forEach(opt=>{
     opt.onclick=ev=>{
       ev.stopPropagation();
       if(opt.dataset.scale==='auto') setUiScaleAuto();
       else setUiScale(parseInt(opt.dataset.scale,10)/100);
-      themePanel.querySelectorAll('.scale-opt').forEach(o=>o.classList.remove('active'));
+      themePanel.querySelectorAll('.scale-opt[data-scale]').forEach(o=>o.classList.remove('active'));
       opt.classList.add('active');
       // The zoom just changed, so the panel's already-computed fixed position (from
       // before the change) no longer lines up with the theme button - reposition
@@ -16569,6 +16640,7 @@ async function _gunzip(bytes, max=20*1024*1024){
 function _shareePayload(m){
   const p = { v:1, title:m.title, color:m.color, style:m.style, layout:m.layout,
               rootId:m.rootId, nodes:m.nodes, links:m.links||[], vars:m.vars||{} };
+  if(m.themeSize) p.themeSize = m.themeSize;
   if(m.layoutConfig) p.layoutConfig = m.layoutConfig;   // omitted entirely when unset
   if(m.styleConfig) p.styleConfig = m.styleConfig;
   if(m.lookConfig) p.lookConfig = m.lookConfig;
@@ -16628,7 +16700,7 @@ async function tryEnterSharedView(){
   map=sanitizeMapData({ id:'shared', title:payload.title||'Shared map', color:payload.color||'#e0613a',
         style:payload.style, layout:payload.layout, rootId:payload.rootId,
         nodes:payload.nodes||{}, links:payload.links||[], vars:payload.vars||{},
-        layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
+        themeSize:payload.themeSize, layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
   sel=null;
   $('#mapTitle').value=map.title; $('#mapTitle').readOnly=true;
   // Grow the title <input> to fit the whole title (it clips to its width) so a
@@ -16670,7 +16742,7 @@ async function tryEnterPublicView(){
   map=sanitizeMapData({ id:'shared', title:payload.title||'Published map', color:payload.color||'#e0613a',
         style:payload.style, layout:payload.layout, rootId:payload.rootId,
         nodes:payload.nodes||{}, links:payload.links||[], vars:payload.vars||{},
-        layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
+        themeSize:payload.themeSize, layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
   sel=null;
   $('#mapTitle').value=map.title; $('#mapTitle').readOnly=true;
   $('#mapTitle').size=Math.max(8,(map.title||'').length+1);
@@ -16718,7 +16790,7 @@ async function consumePendingImport(){
   map=sanitizeMapData({ id, title:(p.title||'Shared map')+' (copy)', titleAuto:false, color:p.color||'#e0613a',
         style:p.style, layout:p.layout, rootId:p.rootId, nodes:p.nodes||{},
         links:p.links||[], vars:p.vars||{}, updated:Date.now(),
-        layoutConfig:p.layoutConfig, styleConfig:p.styleConfig, lookConfig:p.lookConfig, themeConfig:p.themeConfig });   // an editable copy keeps the map's settings
+        themeSize:p.themeSize, layoutConfig:p.layoutConfig, styleConfig:p.styleConfig, lookConfig:p.lookConfig, themeConfig:p.themeConfig });   // an editable copy keeps the map's settings
   sel=map.rootId; history=[]; hpos=-1; pushHistory();
   $('#mapTitle').value=map.title;
   render(); fit();
@@ -16804,7 +16876,8 @@ const Collab = (function(){
 
   const clone = o => JSON.parse(JSON.stringify(o));
   const snap  = () => ({ nodes:clone(map.nodes), rootId:map.rootId, title:map.title, color:map.color,
-                         links:clone(map.links||[]), layout:map.layout, vars:clone(map.vars||{}), style:map.style });
+                         links:clone(map.links||[]), layout:map.layout, vars:clone(map.vars||{}), style:map.style,
+                         themeSize:map.themeSize });
   // The identity rides on the upgrade URL: a room that has an access list is
   // gated on the socket exactly like the HTTP API (read to join, write to
   // change anything). No identity = anonymous, which open rooms still accept.
@@ -16892,6 +16965,7 @@ const Collab = (function(){
       if(s.color) map.color=s.color;
       if(s.links) map.links=clone(s.links);
       if(s.layout) map.layout=s.layout;
+      if('themeSize' in s) map.themeSize=s.themeSize;
       sanitizeMapData(map);              // a peer's snapshot is as untrusted as a share link
       if(s.vars)  map.vars=clone(s.vars);
       if('style' in s) map.style=s.style;
@@ -16942,6 +17016,7 @@ const Collab = (function(){
     if(prev.layout!==cur.layout) ops.push({t:'meta', k:'layout', v:cur.layout});
     if(JSON.stringify(prev.vars||{})!==JSON.stringify(cur.vars||{})) ops.push({t:'meta', k:'vars', v:cur.vars});
     if(JSON.stringify(prev.style)!==JSON.stringify(cur.style)) ops.push({t:'meta', k:'style', v:cur.style});
+    if(prev.themeSize!==cur.themeSize) ops.push({t:'meta', k:'themeSize', v:cur.themeSize});
     return ops;
   }
 
@@ -17287,7 +17362,7 @@ function cloudDiff(base, cur){
   const ops=[]; const bn=(base&&base.nodes)||{}, cn=(cur&&cur.nodes)||{};
   for(const id in cn){ if(JSON.stringify(bn[id])!==JSON.stringify(cn[id])) ops.push({t:'node', id, n:cn[id]}); }
   for(const id in bn){ if(!cn[id]) ops.push({t:'del', id}); }
-  ['title','color','rootId','layout','style'].forEach(k=>{ if((base||{})[k]!==(cur||{})[k]) ops.push({t:'meta',k,v:cur[k]}); });
+  ['title','color','rootId','layout','style','themeSize'].forEach(k=>{ if((base||{})[k]!==(cur||{})[k]) ops.push({t:'meta',k,v:cur[k]}); });
   if(JSON.stringify((base&&base.links)||[])!==JSON.stringify((cur&&cur.links)||[])) ops.push({t:'meta',k:'links',v:cur.links});
   if(JSON.stringify((base&&base.vars)||{})!==JSON.stringify((cur&&cur.vars)||{})) ops.push({t:'meta',k:'vars',v:cur.vars});
   return ops;
@@ -17304,6 +17379,8 @@ function adoptCloudMerged(merged){
   if(merged.layout) map.layout=merged.layout;
   sanitizeMapData(map);                  // the room's copy is as untrusted as a share link
   if('style' in merged) map.style=merged.style;
+  if('themeSize' in merged && ['s','m','l','xl'].includes(merged.themeSize)) map.themeSize=merged.themeSize;
+  else if('themeSize' in merged) delete map.themeSize;
   if(merged.vars) map.vars=merged.vars;
   sel = (selId && map.nodes[selId]) ? map.nodes[selId] : null;
   if($('#mapTitle')) $('#mapTitle').value=map.title;
@@ -17435,7 +17512,7 @@ function _applySharedMap(id, token, data){
   map=sanitizeMapData({ id:'shared-'+id, title:data.title||'Shared map', color:data.color||'#e0613a',
         style:data.style, layout:data.layout||'balanced', rootId:data.rootId,
         nodes:data.nodes||{}, links:data.links||[], vars:data.vars||{},
-        layoutConfig:data.layoutConfig, styleConfig:data.styleConfig, lookConfig:data.lookConfig, themeConfig:data.themeConfig });   // collaborators see the owner's spacing, style, look and colours
+        themeSize:data.themeSize, layoutConfig:data.layoutConfig, styleConfig:data.styleConfig, lookConfig:data.lookConfig, themeConfig:data.themeConfig });   // collaborators see the owner's spacing, style, look and colours
   map._cloudView=id;
   map._opening=true;                 // opening a shared map isn't an edit - suppress the save pill until it settles
   if(editable){ map._cloudEdit={ id, token }; }
