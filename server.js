@@ -628,9 +628,10 @@ const server = http.createServer(async (req, res) => {
       const u = requireAuth(req, res); if (!u) return;
       const id = pubMatch[1];
       if (!Q.ownsMap.get(u.id, id)) return send(res, 404, { error: 'not found' });
-      const proto = req.headers['x-forwarded-proto'] || 'http';
-      const host = req.headers['x-forwarded-host'] || req.headers.host || ('localhost:' + PORT);
-      const urlOf = (guid) => `${proto}://${host}/public/${guid}`;
+      // Return a path, not an absolute URL: behind a reverse proxy the server
+      // may only see an upstream IP, while the browser knows the public domain.
+      // The client resolves this against the origin the user actually visited.
+      const urlOf = (guid) => `/public/${guid}`;
       if (req.method === 'GET') {
         const row = Q.pubForMap.get(u.id, id);
         return send(res, 200, row

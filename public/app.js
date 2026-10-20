@@ -4576,14 +4576,12 @@ function addNode(parentId,asSibling){
   const pn=map.nodes[parent]||map.nodes[map.rootId];
   const side = parent===map.rootId ? (childrenOf(map.rootId).length%2? 'left':'right') : (pn.side||'right');
   const id=uid();
-  // Pick a random soft color from the palette (skip plain white at index 0).
-  // Terminal style defaults cards to empty, so new nodes get no colour there.
-  const _termNew = resolvedMapStyle(map)==='terminal';
-  const palette=NODE_COLORS.slice(1);
-  const color=_termNew ? null : palette[Math.floor(Math.random()*palette.length)];
+  // New cards follow the theme like the root and imported nodes do. '#fff' is
+  // the no-explicit-colour sentinel render() resolves to --card-bg, so a new
+  // node matches the cards around it instead of standing out with a random
+  // palette pick.
   map.nodes[id]={id,text:'New topic',parent,
-    x:pn.x+(side==='left'?-180:180),y:pn.y+40,side, created:Date.now()};
-  if(color) map.nodes[id].color=color;
+    x:pn.x+(side==='left'?-180:180),y:pn.y+40,side, created:Date.now(), color:'#fff'};
   if(pn.collapsed) pn.collapsed=false;
   pushHistory();
   // Stable auto-layout tidies the tree (the new node is inserted in order and
@@ -16752,7 +16750,9 @@ async function publishCurrentMap(){
   catch(e){ toast('Could not save the map before publishing'); return; }
   try{
     const res=await ServerStore.publish(map.id);
-    showPublishPopup(res.url);
+    // Resolve against the origin the user is actually on. The server only
+    // returns a path because a reverse proxy may expose it as an upstream IP.
+    showPublishPopup(new URL('public/'+res.guid, location.origin+'/').href);
   }catch(e){
     toast(e && e.message==='401' ? 'Please sign in again' : 'Could not publish this map');
   }
