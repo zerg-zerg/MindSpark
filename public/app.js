@@ -12577,6 +12577,7 @@ function attachColorSwatches(ta, onLive){
 /* ---------- Themes ---------- */
 const THEMES = [
   {id:'light',           name:'Light',           swatch:['#f4efe6','#ffffff','#e0613a']},
+  {id:'classic-outline', name:'Classic<br>Outline', swatch:['#f4efe6','#ffffff','#e0613a']},
   {id:'dark',            name:'Dark',            swatch:['#1e1e1e','#2d2d2d','#3794ff']},
   {id:'light-owl',       name:'Light Owl',       swatch:['#fbfbfb','#ffffff','#2aa298']},
   {id:'night-owl',       name:'Night Owl',       swatch:['#011627','#0b2942','#7e57c2']},
@@ -12633,8 +12634,7 @@ const THEMES = [
   {id:'quantum-violet',   name:'Quantum<br>Violet', swatch:['#0e0a18','#18122a','#8b5cf6']},
   {id:'copper-rust',      name:'Copper<br>Rust',   swatch:['#16120e','#241a12','#ea580c']},
   {id:'lunar-silver',     name:'Lunar<br>Silver',  swatch:['#0e1014','#181c22','#94a3b8']},
-  {id:'xmind-light',     name:'XMind<br>Light',  swatch:['#f5f5f5','#ffffff','#e86839']},
-  {id:'classic-outline', name:'Classic<br>Outline', swatch:['#f4efe6','#ffffff','#e0613a']}
+  {id:'xmind-light',     name:'XMind<br>Light',  swatch:['#f5f5f5','#ffffff','#e86839']}
 ];
 // Shown in their own dedicated panel section, not mixed into the regular
 // colour-theme grid above. Deliberately a different kind of thing from

@@ -1421,15 +1421,18 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     opacity:0; pointer-events:none; transition:opacity .12s, border-color .12s;
   }
   /* Stem bridging the gap the badge keeps away from the card edge, so the
-     collapsed control still reads as hanging on the branch. */
+     collapsed control still reads as hanging on the branch. The stem ends
+     exactly at the ring's outer edge (offsets are measured from the badge's
+     padding box, which sits 2px inside its border), so it never pokes inside
+     past the ring. */
   .node .fold-btn::before{
     content:''; position:absolute; z-index:-1;
     background:var(--edge-color, var(--line-2));
   }
-  .node .fold-btn[data-side="right"]::before{right:calc(100% - 2px); top:50%; width:13px; height:2px; transform:translateY(-50%)}
-  .node .fold-btn[data-side="left"]::before{left:calc(100% - 2px); top:50%; width:13px; height:2px; transform:translateY(-50%)}
-  .node .fold-btn[data-side="top"]::before{bottom:calc(100% - 2px); left:50%; height:13px; width:2px; transform:translateX(-50%)}
-  .node .fold-btn[data-side="bottom"]::before{top:calc(100% - 2px); left:50%; height:13px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="right"]::before{right:18px; top:50%; width:12px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="left"]::before{left:18px; top:50%; width:12px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="top"]::before{top:18px; left:50%; height:12px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="bottom"]::before{bottom:18px; left:50%; height:12px; width:2px; transform:translateX(-50%)}
   .node .fold-btn[data-side="left"]{right:auto; left:-30px; transform:translateY(-50%)}
   .node .fold-btn[data-side="top"]{top:-30px; right:auto; left:50%; transform:translate(-50%,-50%)}
   .node .fold-btn[data-side="bottom"]{top:auto; bottom:-30px; right:auto; left:50%; transform:translate(-50%,50%)}
@@ -1441,8 +1444,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .node .fold-btn .fold-icon{opacity:0; font-size:12px; font-weight:700; line-height:1; color:var(--ink)}
   .node:hover .fold-btn .fold-count{opacity:0}
   .node:hover .fold-btn .fold-icon{opacity:1}
-  .node .fold-btn:hover{border-color:var(--accent)}
-  .node .fold-btn.collapsed{border-color:var(--accent); color:var(--ink)}
+  .node .fold-btn.collapsed{color:var(--ink)}
   .node:hover .fold-btn, .node.collapsed .fold-btn{opacity:1; pointer-events:auto}
   .node.editing .fold-btn{display:none}
 
