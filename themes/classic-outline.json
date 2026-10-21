@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "id": "classic-outline",
+  "name": "Classic Outline",
+  "vars": {
+    "--toolbar-bg": "#23201b",
+    "--toolbar-text": "#fff",
+    "--paper": "#f4efe6",
+    "--paper-2": "#efe8db",
+    "--ink": "#23201b",
+    "--ink-soft": "#6b6357",
+    "--line": "#d8cfbf",
+    "--line-2": "#c8bda8",
+    "--accent": "#e0613a",
+    "--accent-deep": "#b8451f",
+    "--teal": "#2f6f6a",
+    "--chrome": "#fbf8f2",
+    "--chrome-edge": "#e7ddcc",
+    "--node-bg": "#ffffff",
+    "--node-ink": "#23201b",
+    "--canvas-dot": "#d8cfbf",
+    "--stage-glow": "rgba(255,255,255,.5)",
+    "--link": "#b8451f",
+    "--shadow": "0 2px 4px rgba(40,30,15,.06),0 8px 24px rgba(40,30,15,.10)",
+    "--shadow-lg": "0 10px 40px rgba(40,30,15,.18)"
+  }
+}

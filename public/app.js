@@ -1614,7 +1614,12 @@ function render(){
     _seen.add(id);
     if(_inOrder && _lastNodeOrder[_order.length]!==id) _inOrder=false;
     _order.push(id);
-    const _sig=_nodeSignature(id, n, hasKids, roll, zd, _metricsKey);
+    // The fold badge shows the direct-child count on the branch edge (foldBranchSide(),
+    // below) - both must invalidate a cached element: a signature without the count
+    // (or the branch side) kept displaying a stale badge while every other field matched.
+    const _kidCount=childrenOf(id).length;
+    const _foldSide=hasKids?foldBranchSide(id,n):'';
+    const _sig=_nodeSignature(id, n, hasKids, roll, zd, _metricsKey)+'|k'+_kidCount+'|fs'+_foldSide;
     const _old=_nodeEls.get(id);
     if(_old && _nodeSig.get(id)===_sig){
       // Unchanged: keep the element and its measured size. Position and the
@@ -1760,38 +1765,58 @@ function render(){
       el.appendChild(wm);
     }
 
-    // ---- Quick-action handles (appear on hover; collapse stays visible) ----
-    const mkHandle=(cls,label,title,onClick)=>{
-      const h=document.createElement('span');
-      h.className='handle '+cls; h.textContent=label; h.title=title;
-      h.addEventListener('mousedown',ev=>ev.stopPropagation());
-      h.addEventListener('click',ev=>{ ev.stopPropagation(); onClick(); });
-      return h;
-    };
-
-    // Collapse / expand toggle - only on nodes with children
+    // ---- Branch fold badge + add dots ----
+    // The collapse/expand control no longer lives inside the card. A node with
+    // children wears a small circle ON the edge where its child lines branch
+    // (the same attach point drawEdges computes): the direct-child count shows
+    // at rest, and hovering swaps it for the toggle glyph - X to collapse,
+    // + to expand. The per-side add dots appear only while the node is
+    // selected (CSS keys off .node.sel).
     if(hasKids){
-      el.appendChild(mkHandle(
-        'h-collapse'+(n.collapsed?' collapsed':''),
-        // Disclosure chevrons, not +/-: the collapsed state used to render the
-        // same '+' as the add-child and add-sibling handles sitting right next
-        // to it, so "expand" was easy to mistake for "add sibling".
-        n.collapsed?'▸':'▾',
-        n.collapsed?`Expand (${roll.desc[id]} hidden)`:'Collapse',
-        // Looked up by id at click time, never through the `n` this element was
-        // built from: the element outlives that object. Undo/redo, Markdown-mode
-        // sync, a collab snapshot and a cloud merge all replace map.nodes with
-        // fresh objects, and render() keeps this element whenever the node's
-        // signature is unchanged - so a captured `n` would be a detached copy,
-        // and the click would toggle it while the map showed nothing.
+      const fb=document.createElement('span');
+      fb.className='fold-btn'+(n.collapsed?' collapsed':'');
+      fb.dataset.side=_foldSide;
+      const cnt=document.createElement('span'); cnt.className='fold-count'; cnt.textContent=_kidCount;
+      const ico=document.createElement('span'); ico.className='fold-icon'; ico.textContent=n.collapsed?'+':'−';
+      fb.appendChild(cnt); fb.appendChild(ico);
+      fb.addEventListener('mousedown',ev=>ev.stopPropagation());
+      fb.addEventListener('click',ev=>ev.stopPropagation());
+      // Looked up by id at click time, never through the `n` this element was
+      // built from: the element outlives that object. Undo/redo, Markdown-mode
+      // sync, a collab snapshot and a cloud merge all replace map.nodes with
+      // fresh objects, and render() keeps this element whenever the node's
+      // signature is unchanged - so a captured `n` would be a detached copy,
+      // and the click would toggle it while the map showed nothing.
+      fb.addEventListener('click',
         ()=>{ const cur=map && map.nodes[id]; if(!cur) return; cur.collapsed=!cur.collapsed; pushHistory(); autoLayout(); }
-      ));
+      );
+      el.appendChild(fb);
     }
-    // Add child - every node
-    el.appendChild(mkHandle('h-child','+','Add child topic',()=>addNode(id,false)));
-    // Add sibling - every non-root node
-    if(id!==map.rootId){
-      el.appendChild(mkHandle('h-sibling','+','Add sibling topic',()=>addNode(id,true)));
+    // Add dots - three junction circles on the selected node's sides: the outer
+    // side (away from the parent line) adds a child, top inserts a sibling
+    // directly above, bottom directly below.
+    {
+      const dots=document.createElement('span'); dots.className='add-dots';
+      const mkDot=(side,tip,onClick)=>{
+        const d=document.createElement('span');
+        d.className='add-dot'; d.dataset.side=side;
+        const ic=document.createElement('span'); ic.className='add-ico'; ic.textContent='+'; d.appendChild(ic);
+        const tp=document.createElement('span'); tp.className='add-tip'; tp.textContent=tip; d.appendChild(tp);
+        d.addEventListener('mousedown',ev=>ev.stopPropagation());
+        d.addEventListener('click',ev=>{ ev.stopPropagation(); onClick(); });
+        return d;
+      };
+      const ADD_CHILD='Добавить дочернюю ноду', INS_ABOVE='Вставить ноду выше', INS_BELOW='Вставить ноду ниже';
+      if(id===map.rootId){
+        // The root has no parent line and no siblings: both side dots grow the map.
+        dots.appendChild(mkDot('right',ADD_CHILD,()=>addNode(id,false)));
+        dots.appendChild(mkDot('left',ADD_CHILD,()=>addNode(id,false)));
+      } else {
+        dots.appendChild(mkDot('top',INS_ABOVE,()=>insertSiblingNode(id,'above')));
+        dots.appendChild(mkDot('bottom',INS_BELOW,()=>insertSiblingNode(id,'below')));
+        dots.appendChild(mkDot(n.side==='left'?'left':'right',ADD_CHILD,()=>addNode(id,false)));
+      }
+      el.appendChild(dots);
     }
     // Resize grip - drag from the bottom-right corner to resize the node
     const grip=document.createElement('span');
@@ -4631,6 +4656,63 @@ function addNode(parentId,asSibling){
   // everything stays non-overlapping). Because layout is stable, existing
   // branches keep their side/order - it tidies, it doesn't reshuffle.
   autoLayout();
+  select(id,true);
+}
+// Which edge of a node its child-tree lines branch from - the edge the fold
+// badge (child count / collapse control) sits on. Mirrors the attach points
+// drawEdges() computes for the same layout, so the badge lands exactly on the
+// branch point instead of floating somewhere arbitrary.
+function foldBranchSide(id, n){
+  const kids=childrenOf(id); if(!kids.length) return n.side==='left'?'left':'right';
+  const layout=map.layout||'balanced';
+  if(layout==='down') return 'bottom';
+  if(layout==='up') return 'top';
+  if(layout==='matrix'||layout==='grid') return 'bottom';   // table stacks grow downward
+  if(layout==='stair'){
+    if(n.parent!==map.rootId){
+      const c=map.nodes[kids[0]];
+      if(c) return ((c.x+(c.w||0)/2) < (n.x+(n.w||0)/2)) ? 'left' : 'right';   // horizontal stem toward the child
+    }
+    return n.side==='left' ? 'left' : 'right';
+  }
+  if(layout==='timeline'){
+    if(n.parent!==map.rootId){
+      const c=map.nodes[kids[0]];
+      if(c) return (c.y < n.y) ? 'top' : 'bottom';   // stem straight out of the top/bottom edge
+    }
+    return n.side==='left' ? 'left' : 'right';
+  }
+  if(layout==='radial'){
+    // Spokes are centre-to-centre, hidden under the cards; point the badge at
+    // the widest direction toward the first child's centre.
+    const c=map.nodes[kids[0]];
+    if(c){
+      const dx=(c.x+(c.w||0)/2)-(n.x+(n.w||0)/2), dy=(c.y+(c.h||0)/2)-(n.y+(n.h||0)/2);
+      if(Math.abs(dx)>=Math.abs(dy)) return dx<0?'left':'right';
+      return dy<0?'top':'bottom';
+    }
+    return 'right';
+  }
+  // balanced / right / left and anything else: the child lines leave the side
+  // the children sit on (drawEdges anchors on the first child's side).
+  const c=map.nodes[kids[0]];
+  return (c && c.side==='left') ? 'left' : 'right';
+}
+// Insert a brand-new node directly above (before) or below (after) `refId`,
+// under the same parent - the selected node's top/bottom add-dot actions.
+// insertSibling() carries the side propagation, the key-order reorder that
+// expresses sibling order, history and the re-layout.
+function insertSiblingNode(refId, where){
+  if(READONLY || !map) return;
+  const ref=map.nodes[refId]; if(!ref || ref.parent==null || refId===map.rootId) return;
+  const parent=map.nodes[ref.parent]; if(!parent) return;
+  // Same side as the reference: in the balanced layout the new node must land
+  // in the same column (a left-side node belongs with its left-side siblings).
+  const side=(ref.parent===map.rootId)?(ref.side||'right'):(parent.side||'right');
+  const id=uid();
+  map.nodes[id]={id,text:'New topic',parent:ref.parent,x:ref.x,y:ref.y,side,created:Date.now(),color:'#fff'};
+  if(parent.collapsed) parent.collapsed=false;
+  insertSibling(id,refId,where==='above'?'before':'after');
   select(id,true);
 }
 // Position a freshly-added node relative to its existing siblings without
@@ -12547,7 +12629,8 @@ const THEMES = [
   {id:'quantum-violet',   name:'Quantum<br>Violet', swatch:['#0e0a18','#18122a','#8b5cf6']},
   {id:'copper-rust',      name:'Copper<br>Rust',   swatch:['#16120e','#241a12','#ea580c']},
   {id:'lunar-silver',     name:'Lunar<br>Silver',  swatch:['#0e1014','#181c22','#94a3b8']},
-  {id:'xmind-light',     name:'XMind<br>Light',  swatch:['#f5f5f5','#ffffff','#e86839']}
+  {id:'xmind-light',     name:'XMind<br>Light',  swatch:['#f5f5f5','#ffffff','#e86839']},
+  {id:'classic-outline', name:'Classic<br>Outline', swatch:['#f4efe6','#ffffff','#e0613a']}
 ];
 // Shown in their own dedicated panel section, not mixed into the regular
 // colour-theme grid above. Deliberately a different kind of thing from
