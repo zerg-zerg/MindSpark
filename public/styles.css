@@ -1403,33 +1403,48 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .formula-ac-desc{font-size:11px;color:var(--ink-soft)}
 
   /* ===== Branch fold badge + selection add dots ===== */
-  /* The collapse/expand control sits ON the edge where the child lines branch
-     (render sets [data-side] to the same attach point drawEdges() uses). The
-     direct-child count shows at rest; hovering the node swaps it for the
-     toggle glyph - − collapses, + expands. */
+  /* The collapse/expand control floats just OFF the edge where the child lines
+     branch (render sets [data-side] to the same attach point drawEdges()
+     uses). An expanded node keeps the badge out of sight until the node - or
+     the badge itself, which is inside the node's hit area - is hovered; a
+     collapsed branch shows it at rest as the expand control, tied back to the
+     card edge by a short stem that stands in for the folded branch lines. The
+     direct-child count shows at rest; hovering swaps it for the toggle glyph
+     - − collapses, + expands. A single child never gets a badge (render
+     skips it). */
   .node .fold-btn{
-    position:absolute; z-index:8; top:50%; right:-16px; transform:translateY(-50%);
-    width:26px; height:26px; border-radius:50%; box-sizing:border-box;
-    display:flex; align-items:center; justify-content:center;
+    position:absolute; z-index:8; top:50%; right:-30px; transform:translateY(-50%);
+    width:20px; height:20px; border-radius:50%; box-sizing:border-box;
     background:var(--paper); border:2px solid var(--edge-color, var(--line-2));
-    font:600 11px/1 var(--sans); color:var(--ink-soft);
-    cursor:pointer; user-select:none; transition:border-color .12s, background-color .12s;
+    font:600 10px/1 var(--sans); color:var(--ink-soft);
+    cursor:pointer; user-select:none;
+    opacity:0; pointer-events:none; transition:opacity .12s, border-color .12s;
   }
-  .node .fold-btn[data-side="left"]{right:auto; left:-16px; transform:translateY(-50%)}
-  .node .fold-btn[data-side="top"]{top:-16px; right:auto; left:50%; transform:translate(-50%,-50%)}
-  .node .fold-btn[data-side="bottom"]{top:auto; bottom:-16px; right:auto; left:50%; transform:translate(-50%,50%)}
-  .node .fold-btn .fold-icon{opacity:0; font-size:15px; font-weight:700; line-height:1; color:var(--ink)}
+  /* Stem bridging the gap the badge keeps away from the card edge, so the
+     collapsed control still reads as hanging on the branch. */
+  .node .fold-btn::before{
+    content:''; position:absolute; z-index:-1;
+    background:var(--edge-color, var(--line-2));
+  }
+  .node .fold-btn[data-side="right"]::before{right:calc(100% - 2px); top:50%; width:13px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="left"]::before{left:calc(100% - 2px); top:50%; width:13px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="top"]::before{bottom:calc(100% - 2px); left:50%; height:13px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="bottom"]::before{top:calc(100% - 2px); left:50%; height:13px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="left"]{right:auto; left:-30px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="top"]{top:-30px; right:auto; left:50%; transform:translate(-50%,-50%)}
+  .node .fold-btn[data-side="bottom"]{top:auto; bottom:-30px; right:auto; left:50%; transform:translate(-50%,50%)}
+  /* Both faces fill the circle dead-centre; the user's hover swaps between
+     them (opacity only - the glyphs never move). */
+  .node .fold-btn .fold-count, .node .fold-btn .fold-icon{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  }
+  .node .fold-btn .fold-icon{opacity:0; font-size:12px; font-weight:700; line-height:1; color:var(--ink)}
   .node:hover .fold-btn .fold-count{opacity:0}
   .node:hover .fold-btn .fold-icon{opacity:1}
   .node .fold-btn:hover{border-color:var(--accent)}
   .node .fold-btn.collapsed{border-color:var(--accent); color:var(--ink)}
+  .node:hover .fold-btn, .node.collapsed .fold-btn{opacity:1; pointer-events:auto}
   .node.editing .fold-btn{display:none}
-  /* While the node is selected its outer side also carries an add-dot, so the
-     badge steps back along the branch line instead of sitting under the dot. */
-  .node.sel .fold-btn[data-side="right"]{right:-30px}
-  .node.sel .fold-btn[data-side="left"]{left:-30px}
-  .node.sel .fold-btn[data-side="top"]{top:-30px}
-  .node.sel .fold-btn[data-side="bottom"]{bottom:-30px}
 
   /* Add dots: three junction circles on the selected node's sides. The dot
      border is deliberately thicker than the edge stroke (2.2px) so it reads as

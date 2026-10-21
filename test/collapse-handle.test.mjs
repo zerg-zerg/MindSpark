@@ -71,9 +71,12 @@ describe('fold badge - toggles the live node', () => {
 });
 
 describe('fold badge - reachable in every look, map style and UI layout', () => {
-  // Every rule whose selector mentions the badge. Only the fold/count layer swap
-  // and edit mode may touch its visibility; nothing keyed on a look, a map style
-  // or a UI layout is allowed to hide it, make it non-interactive or shrink it.
+  // Every rule whose selector mentions the badge. The badge's own visibility
+  // contract is: hidden at rest on an expanded node, restored whenever the
+  // node is hovered or the node is collapsed, and gone in edit/present modes.
+  // The count-to-glyph swap is two opacity flips on the inner faces. Beyond
+  // those cases, nothing keyed on a look, a map style, a UI layout or a theme
+  // is allowed to hide it, make it non-interactive, or resize it to nothing.
   const plain = CSS.replace(/\/\*[\s\S]*?\*\//g, '');   // comments would bleed into selectors
   const rules = [...plain.matchAll(/([^{}]*?(?:\.fold-btn)[^{}]*)\{([^}]*)\}/g)]
     .map(m => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
@@ -85,19 +88,38 @@ describe('fold badge - reachable in every look, map style and UI layout', () => 
 
   test('no look, map style or UI layout hides or disables the badge', () => {
     const disabling = /display\s*:\s*none|visibility\s*:\s*hidden|pointer-events\s*:\s*none|width\s*:\s*0|height\s*:\s*0|opacity\s*:\s*0(?![.\d])/;
-    const allowed = /\.node\.editing|body\.presenting|\.node:hover[^{]*\.fold-(count|icon)|\.node \.fold-btn \.fold-(count|icon)$/;
+    const allowed = /^\.node \.fold-btn$|\.node\.editing|body\.presenting|\.node:hover[^{]*\.fold-(btn|count|icon)|\.node \.fold-btn \.fold-(count|icon)$/;
     for (const r of rules) {
       if (!disabling.test(r.body)) continue;
       // `.fold-count{opacity:0}` on hover / `.fold-icon{opacity:0}` at rest are
       // the two halves of the count-to-glyph swap, not hidden functionality.
+      // The base rule's opacity:0 + pointer-events:none is the "expanded nodes
+      // keep the badge out of sight until hovered" contract.
       assert.match(r.sel, allowed, `"${r.sel}" hides or disables the badge`);
       assert.doesNotMatch(r.sel, /data-look|data-style|ui-[a-z]+|data-theme/, `"${r.sel}" is keyed on a look/style/layout/theme`);
     }
   });
 
-  test('the badge is visible at rest (it carries the child count), not only on hover', () => {
+  test('the badge surfaces on node hover and stays up on a collapsed branch', () => {
+    const restore = rules.find(r => r.sel === '.node:hover .fold-btn, .node.collapsed .fold-btn');
+    assert.ok(restore, 'one rule restores the badge for hovered and collapsed nodes');
+    assert.match(restore.body, /opacity\s*:\s*1/, 'restores visibility');
+    assert.match(restore.body, /pointer-events\s*:\s*auto/, 'restores interactivity');
     const base = rules.find(r => r.sel === '.node .fold-btn');
-    assert.doesNotMatch(base.body, /opacity\s*:\s*0(?![.\d])|display\s*:\s*none/, 'base state must keep the count visible');
-    assert.match(base.body, /z-index\s*:\s*[1-9]/, 'badge sits above the card and any ::after decoration');
+    assert.match(base.body, /opacity\s*:\s*0/, 'base state keeps an expanded node badge hidden');
+    assert.doesNotMatch(base.body, /display\s*:\s*none/, 'the rest state hides via opacity so hover can fade it in');
+    assert.match(base.body, /z-index\s*:\s*[1-9]/, 'badge sits above the card and its stem');
+  });
+
+  test('the badge hangs off the card edge with a stem back to the card', () => {
+    const base = rules.find(r => r.sel === '.node .fold-btn');
+    assert.match(base.body, /width\s*:\s*20px/, 'badge is the small 20px circle');
+    assert.match(base.body, /right\s*:\s*-30px/, 'badge floats 10px clear of the card edge');
+    const stemBase = rules.find(r => r.sel === '.node .fold-btn::before');
+    assert.ok(stemBase, 'the stem element exists');
+    assert.match(stemBase.body, /var\(--edge-color/, 'stem uses the branch-line colour');
+    const sides = rules.filter(r => /::before/.test(r.sel) && /data-side/.test(r.sel));
+    assert.equal(sides.length, 4, 'each of the four data-sides draws a stem');
+    assert.ok(sides.every(s => /width/.test(s.body)), 'stems have geometry');
   });
 });

@@ -1767,12 +1767,16 @@ function render(){
 
     // ---- Branch fold badge + add dots ----
     // The collapse/expand control no longer lives inside the card. A node with
-    // children wears a small circle ON the edge where its child lines branch
-    // (the same attach point drawEdges computes): the direct-child count shows
-    // at rest, and hovering swaps it for the toggle glyph - X to collapse,
-    // + to expand. The per-side add dots appear only while the node is
-    // selected (CSS keys off .node.sel).
-    if(hasKids){
+    // two or more children wears a small circle just off the edge where its
+    // child lines branch (the same attach point drawEdges computes): CSS keeps
+    // it hidden until the node is hovered, and pinned visible while the node
+    // itself is collapsed (there it doubles as the expand control, joined to
+    // the card edge by a CSS stem). Hovering swaps the direct-child count for
+    // the toggle glyph - − to collapse, + to expand. A node with a single
+    // child gets no badge at all: its one branch line already points at the
+    // child, and a count of 1 says nothing. The per-side add dots appear only
+    // while the node is selected (CSS keys off .node.sel).
+    if(hasKids && _kidCount>1){
       const fb=document.createElement('span');
       fb.className='fold-btn'+(n.collapsed?' collapsed':'');
       fb.dataset.side=_foldSide;
