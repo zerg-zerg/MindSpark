@@ -1713,7 +1713,6 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     background:none !important; border:none !important; box-shadow:none !important;
     padding:4px 8px; min-width:0;
   }
-  #viewport[data-style="classic-outline"] #edges path{stroke-linecap:round}
 
   /* Cascades the pencil font to every part of the app that already
      references --sans/--serif (sidebar, modals, buttons, topbar, and

@@ -2693,6 +2693,7 @@ function buildEdgeLabels(hidden, layout){
 }
 function edgePath(x1,y1,x2,y2,leftSide,horizontal,style){
   switch(style){
+    case 'classic-outline':
     case 'classic': { // step / right-angle elbow, softened with a small quadratic fillet
       // The radius is clamped to the shorter adjoining segment so a tight branch
       // can never loop back over itself. Kept inline (not a helper) because the
@@ -11167,9 +11168,9 @@ async function exportPNG(){
         else if(c==='C'){ ctx.bezierCurveTo(nums[0],nums[1],nums[2],nums[3],nums[4],nums[5]); }
         else if(c==='Q'){ ctx.quadraticCurveTo(nums[0],nums[1],nums[2],nums[3]); }
       }
-    } else if(mapStyle==='classic'){
+    } else if(mapStyle==='classic'||mapStyle==='classic-outline'){
       // Reuse the live edge geometry so the canvas export cannot drift from SVG.
-      const d=edgePath(x1,y1,x2,y2,false,horizontal,'classic');
+      const d=edgePath(x1,y1,x2,y2,false,horizontal,mapStyle);
       const parts=d.split(/(?=[MLCQ])/);
       for(const seg of parts){
         const c=seg[0]; const nums=seg.slice(1).trim().split(/[\s,]+/).map(Number);
@@ -11283,7 +11284,7 @@ async function exportPNG(){
     const n=map.nodes[i]; const isRoot=(i===map.rootId);
     const w=n.w||120, h=n.h||40;
     const baseR = _baseRadius;
-    let radius = isRoot ? (mapStyle==='classic' ? 6 : mapStyle==='minimal' ? 8 : baseR) : baseR;
+    let radius = isRoot ? (mapStyle==='classic'||mapStyle==='classic-outline' ? 6 : mapStyle==='minimal' ? 8 : baseR) : baseR;
     const r = Math.min(radius, h/2);
     // Detect formula early for border/badges/text
     let _isFormula=false, _formulaVal=null;
@@ -11322,7 +11323,10 @@ async function exportPNG(){
       }
     } else {
       const _hasColor = n.color && n.color!=='#fff' && n.color!=='#ffffff';
-      ctx.fillStyle = _hasColor ? n.color
+      // Classic Outline: generations 3+ render as bare text (their CSS zeroes
+      // background/border/shadow), so the export paints them on the page too.
+      ctx.fillStyle = (mapStyle==='classic-outline' && (zd[i]||0)>=2) ? 'transparent'
+        : _hasColor ? n.color
         : (zd[i] && zd[i]%2===1 ? zebraA : (zd[i] ? zebraB : themeNodeBg));
     }
     ctx.fill();
@@ -11330,6 +11334,7 @@ async function exportPNG(){
       if(mapStyle==='bubble') return false;
       if(mapStyle==='sketch' && isRoot) return false;
       if((mapStyle==='modern' || mapStyle==='dashed') && isRoot) return false;
+      if(mapStyle==='classic-outline' && (zd[i]||0)>=2) return false;
       return true;
     })();
     if(mapStyle==='terminal'){
@@ -11350,6 +11355,7 @@ async function exportPNG(){
       else if(mapStyle==='zigzag'){ ctx.strokeStyle=themeLine; ctx.lineWidth=2; }
       else if(mapStyle==='sketch'){ ctx.strokeStyle=themeInk; ctx.lineWidth=2; }
       else if(mapStyle==='classic'){ ctx.strokeStyle=themeLine; ctx.lineWidth=1.5; }
+      else if(mapStyle==='classic-outline'){ ctx.strokeStyle=themeLine; ctx.lineWidth = isRoot ? 1 : 2; }
       else if(mapStyle==='dashed'){ ctx.strokeStyle=themeLine; ctx.lineWidth=1.5; }
       else if(mapStyle==='circuit'){ ctx.strokeStyle=accent; ctx.lineWidth=1.5; ctx.shadowColor=accent; ctx.shadowBlur=_glow||6; }
       else if(mapStyle==='blueprint'){ ctx.strokeStyle=themeInk; ctx.lineWidth=1.5; ctx.setLineDash(_sc.dash>0?[_sc.dash, Math.max(2, Math.round(_sc.dash*0.7))]:[6,4]); }
@@ -12686,7 +12692,7 @@ const MAP_STYLES = [
 const STYLE_CONFIG_DEFAULTS = {
   modern:  { edgeWidth:2.2, edgeColor:'', radius:12,  cardPad:0,  glow:0,  dash:0 },
   classic: { edgeWidth:1.6, edgeColor:'', radius:4,   cardPad:0,  glow:0,  dash:0 },
-  'classic-outline': { edgeWidth:1.6, edgeColor:'', radius:2, cardPad:0,  glow:0,  dash:0 },
+  'classic-outline': { edgeWidth:1.6, edgeColor:'', radius:4, cardPad:0,  glow:0,  dash:0 },
   bubble:  { edgeWidth:2,   edgeColor:'', radius:50, cardPad:10, glow:0,  dash:0 },
   sketch:  { edgeWidth:1.6, edgeColor:'', radius:3,   cardPad:0,  glow:0,  dash:0,  tilt:2 },
   dashed:  { edgeWidth:2.2, edgeColor:'', radius:14,  cardPad:0,  glow:0,  dash:7 },
