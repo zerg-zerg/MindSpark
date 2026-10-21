@@ -12577,7 +12577,6 @@ function attachColorSwatches(ta, onLive){
 /* ---------- Themes ---------- */
 const THEMES = [
   {id:'light',           name:'Light',           swatch:['#f4efe6','#ffffff','#e0613a']},
-  {id:'classic-outline', name:'Classic<br>Outline', swatch:['#f4efe6','#ffffff','#e0613a']},
   {id:'dark',            name:'Dark',            swatch:['#1e1e1e','#2d2d2d','#3794ff']},
   {id:'light-owl',       name:'Light Owl',       swatch:['#fbfbfb','#ffffff','#2aa298']},
   {id:'night-owl',       name:'Night Owl',       swatch:['#011627','#0b2942','#7e57c2']},
@@ -12667,6 +12666,7 @@ const LOOKS = [
 const MAP_STYLES = [
   {id:'modern',  name:'Modern',  desc:'Soft cards, curved branches'},
   {id:'classic', name:'Classic', desc:'Rectangles, right-angle branches'},
+  {id:'classic-outline', name:'Classic Outline', desc:'Right-angle branches; gen-2 cards, bare text deeper'},
   {id:'bubble',  name:'Bubble',  desc:'Pill cards, thick curves'},
   {id:'sketch',  name:'Sketch',  desc:'Outlined cards, straight lines'},
   {id:'dashed',  name:'Dashed',  desc:'Curved branches drawn as dashes'},
@@ -12686,6 +12686,7 @@ const MAP_STYLES = [
 const STYLE_CONFIG_DEFAULTS = {
   modern:  { edgeWidth:2.2, edgeColor:'', radius:12,  cardPad:0,  glow:0,  dash:0 },
   classic: { edgeWidth:1.6, edgeColor:'', radius:4,   cardPad:0,  glow:0,  dash:0 },
+  'classic-outline': { edgeWidth:1.6, edgeColor:'', radius:2, cardPad:0,  glow:0,  dash:0 },
   bubble:  { edgeWidth:2,   edgeColor:'', radius:50, cardPad:10, glow:0,  dash:0 },
   sketch:  { edgeWidth:1.6, edgeColor:'', radius:3,   cardPad:0,  glow:0,  dash:0,  tilt:2 },
   dashed:  { edgeWidth:2.2, edgeColor:'', radius:14,  cardPad:0,  glow:0,  dash:7 },
@@ -14797,9 +14798,9 @@ function buildStyleThumb(id){
     </svg>
   </span>`;
   let path;
-  if(id==='classic') path='M26,28 L40,28 L40,11 L56,11 M26,28 L40,28 L40,47 L56,47';
+  if(id==='classic'||id==='classic-outline') path='M26,28 L40,28 L40,11 L56,11 M26,28 L40,28 L40,47 L56,47';
   else path='M26,28 C38,28 47,11 56,11 M26,28 C38,28 47,47 56,47';
-  const radius = id==='bubble'? 6 : id==='classic'? 2 : 3;
+  const radius = id==='bubble'? 6 : (id==='classic'||id==='classic-outline')? 2 : 3;
   const stroke = id==='bubble'? 2.2 : 1.4;
   return `<span class="style-thumb">
     <svg viewBox="0 0 70 60" width="70" height="40">
@@ -15140,7 +15141,7 @@ document.addEventListener('click',e=>{
 // (prefers-color-scheme) so dark-mode users get dark by default.
 try{
   let saved = localStorage.getItem('mindspark:theme');
-  const RETIRED_THEMES = {'solarized-dark':'github-dark', 'solarized-light':'github-light', 'monokai':'catppuccin-dark', 'catppuccin':'catppuccin-dark'};   // replaced themes
+  const RETIRED_THEMES = {'solarized-dark':'github-dark', 'solarized-light':'github-light', 'monokai':'catppuccin-dark', 'catppuccin':'catppuccin-dark', 'classic-outline':'light'};   // replaced themes
   if(saved==='handwritten'){
     // Pre-refactor save: 'handwritten' used to be a data-theme value. Migrate
     // intent rather than silently dropping it - falls back to a real color

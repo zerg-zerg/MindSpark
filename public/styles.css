@@ -313,29 +313,6 @@
     --shadow-lg:0 12px 40px rgba(52,52,52,.16);
     --accent-text:var(--accent); --danger:#b73629; --warn:#906000; --ok:#197834;
   }
-  /* Classic Outline - clone of the Light palette plus an XMind logic-chart node
-     treatment: the root keeps a 1px border, first-generation cards a 2px one,
-     and every generation from the third on renders as bare text - no card
-     fill, border, shadow or zebra tint. */
-  :root[data-theme="classic-outline"]{
-    --toolbar-bg:#23201b; --toolbar-text:#fff;
-    --paper:#f4efe6; --paper-2:#efe8db; --ink:#23201b; --ink-soft:#6b6357;
-    --line:#d8cfbf; --line-2:#c8bda8;
-    --accent:#e0613a; --accent-deep:#b8451f; --teal:#2f6f6a;
-    --chrome:#fbf8f2; --chrome-edge:#e7ddcc;
-    --node-bg:#ffffff; --node-ink:#23201b;
-    --canvas-dot:#d8cfbf;
-    --stage-glow:rgba(255,255,255,.5);
-    --link:#b8451f;
-    --shadow:0 2px 4px rgba(40,30,15,.06),0 8px 24px rgba(40,30,15,.10);
-    --shadow-lg:0 10px 40px rgba(40,30,15,.18);
-  }
-  :root[data-theme="classic-outline"] #viewport .node.root{ border:1px solid var(--line-2); }
-  :root[data-theme="classic-outline"] #viewport .node[data-depth="1"]{ border-width:2px; }
-  :root[data-theme="classic-outline"] #viewport .node[data-depth]:not([data-depth="1"]){
-    background:none !important; border:none !important; box-shadow:none !important;
-    padding:4px 8px; min-width:0;
-  }
 :root[data-theme="mint-graphite"]{   /* Mint Graphite */
     --toolbar-bg:#18251f; --toolbar-text:#f7fbf9;
     --paper:#f7fbf9; --paper-2:#e6f3ee; --ink:#34423c; --ink-soft:#63726b;
@@ -1421,18 +1398,18 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     opacity:0; pointer-events:none; transition:opacity .12s, border-color .12s;
   }
   /* Stem bridging the gap the badge keeps away from the card edge, so the
-     collapsed control still reads as hanging on the branch. The stem ends
-     exactly at the ring's outer edge (offsets are measured from the badge's
-     padding box, which sits 2px inside its border), so it never pokes inside
-     past the ring. */
+     collapsed control still reads as hanging on the branch. The stem spans
+     exactly the 10px gap - it ends at the ring's outer edge on one side and
+     flush with the card edge on the other, never entering the circle or the
+     card. */
   .node .fold-btn::before{
     content:''; position:absolute; z-index:-1;
     background:var(--edge-color, var(--line-2));
   }
-  .node .fold-btn[data-side="right"]::before{right:18px; top:50%; width:12px; height:2px; transform:translateY(-50%)}
-  .node .fold-btn[data-side="left"]::before{left:18px; top:50%; width:12px; height:2px; transform:translateY(-50%)}
-  .node .fold-btn[data-side="top"]::before{top:18px; left:50%; height:12px; width:2px; transform:translateX(-50%)}
-  .node .fold-btn[data-side="bottom"]::before{bottom:18px; left:50%; height:12px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="right"]::before{right:18px; top:50%; width:10px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="left"]::before{left:18px; top:50%; width:10px; height:2px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="top"]::before{top:18px; left:50%; height:10px; width:2px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="bottom"]::before{bottom:18px; left:50%; height:10px; width:2px; transform:translateX(-50%)}
   .node .fold-btn[data-side="left"]{right:auto; left:-30px; transform:translateY(-50%)}
   .node .fold-btn[data-side="top"]{top:-30px; right:auto; left:50%; transform:translate(-50%,-50%)}
   .node .fold-btn[data-side="bottom"]{top:auto; bottom:-30px; right:auto; left:50%; transform:translate(-50%,50%)}
@@ -1724,6 +1701,19 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   }
   #viewport[data-style="terminal"] .node.root::after{ content:none; }
   #viewport[data-style="terminal"] #edges path{stroke-linecap:round}
+  #viewport[data-style="classic-outline"]{--edge-color:var(--line-2);--edge-width:1.6}
+  /* Classic Outline - right-angle branches like Classic, plus an XMind
+     logic-chart node treatment: the root keeps a 1px border, first-generation
+     cards a 2px one, and every generation from the third on renders as bare
+     text - no card fill, border, shadow or zebra tint. Colours always come
+     from whichever Colour Theme is active - this style changes shapes only. */
+  #viewport[data-style="classic-outline"] .node.root{ border:1px solid var(--line-2); }
+  #viewport[data-style="classic-outline"] .node[data-depth="1"]{ border-width:2px; }
+  #viewport[data-style="classic-outline"] .node[data-depth]:not([data-depth="1"]){
+    background:none !important; border:none !important; box-shadow:none !important;
+    padding:4px 8px; min-width:0;
+  }
+  #viewport[data-style="classic-outline"] #edges path{stroke-linecap:round}
 
   /* Cascades the pencil font to every part of the app that already
      references --sans/--serif (sidebar, modals, buttons, topbar, and
