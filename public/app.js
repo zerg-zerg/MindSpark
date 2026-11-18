@@ -1158,6 +1158,15 @@ function probeHealth(){
   return _healthProbe;
 }
 async function initStore(){
+  // A host may supply an API-compatible store without changing standalone mode.
+  // It is still MODE 'server' - that is what the editor, publish and the store
+  // calls expect - so the account chip and the publish button keep working.
+  if(window.MINDSPARK_HOST){
+    await window.MINDSPARK_HOST.ready();
+    Store=window.MINDSPARK_HOST.store; MODE='server';
+    CURRENT_USER=window.MINDSPARK_HOST.user||null;
+    return {mode:'server', loggedIn:true, hosted:true};
+  }
   if(await probeHealth()==='server'){
     Store=ServerStore; MODE='server';
     const user=await ServerStore.me();
@@ -1511,7 +1520,7 @@ function applyView(){
 // deliberately: a missed field shows up as a node that silently never updates,
 // which is far worse than an occasional redundant rebuild.
 const _nodeEls=new Map();    // id -> element currently in the DOM
-let _lastNodeOrder=[];       // ids in the DOM order the last render() left them
+let _lastNodeOrder=[];       // all map node ids, in the order the last render left their DOM slots
 const _nodeSig=new Map();    // id -> signature it was built from
 // Bumped whenever a web font finishes loading. A node's cached size was
 // measured against whatever font was resolved at build time, and a font
@@ -1544,6 +1553,55 @@ function clearNodes(){
   _nodeEls.clear(); _nodeSig.clear(); _lastNodeOrder=[];
 }
 
+// Tree table cells. The layout engine knows the width of every depth column and
+// the height of every subtree block; render() applies those as real element
+// sizes so the cards form one grid instead of an indented tree. Kept keyed by
+// map id so a stale cell from the previous map can never size a new one, and
+// cleared by any other layout, which uses natural card sizes.
+let _treeTableCellSizes = null;
+
+// The tree table stretches w/h to the cell, so the text size it was measured at
+// is kept beside them. Non-enumerable on purpose: this is a measurement cache,
+// and map JSON, undo snapshots and cloud diffs must not carry it as content.
+function rememberNaturalSize(n, w, h){
+  const hidden = Object.prototype.hasOwnProperty.call(n, '_nw')
+    && !Object.prototype.propertyIsEnumerable.call(n, '_nw');
+  if(hidden){ n._nw=w; n._nh=h; return; }
+  Object.defineProperty(n, '_nw', { value:w, writable:true, configurable:true });
+  Object.defineProperty(n, '_nh', { value:h, writable:true, configurable:true });
+}
+
+// Apply the measured cells to the existing node elements. Shared by render()
+// and the live edit reflow: both need the same width/height/top on screen and
+// the same w/h for export, the minimap and fit. Elements missing from the DOM
+// are skipped so a stale cell can never resurrect a deleted node.
+function applyTreeTableCells(cells){
+  if(!cells) return;
+  for(const [id, cell] of cells){
+    const n=map.nodes[id], el=_nodeEls.get(id);
+    if(!n || !el) continue;
+    n.w=cell.w; n.h=cell.h;
+    if(cell.x != null){ n.x=cell.x; el.style.left=cell.x+'px'; }
+    if(cell.y != null){ n.y=cell.y; el.style.top=cell.y+'px'; }
+    el.style.setProperty('--tt-w', cell.w+'px');
+    el.style.setProperty('--tt-h', cell.h+'px');
+    el.classList.add('tt-cell');
+    // The layout may have just flipped this node's side (a map switching in
+    // from 'balanced' keeps the old class on a reused element).
+    el.classList.toggle('left', n.side==='left');
+  }
+}
+
+// A reused node element already has a measured size, so render can skip the
+// measure pass - but only while the node object still carries that size.
+// applyMdToMap(), undo/redo and a collab merge replace map.nodes wholesale;
+// the replacement starts without w/h, and without this the layout fell back
+// to 120x40 for every visible node, drifting columns and letting wide cards
+// overlap their children.
+function needsMeasureOnReuse(strategy, n){
+  return strategy==='treetable' || !(n.w>0) || !(n.h>0);
+}
+
 function render(){
   // The Build Prompt panel is bound to one map. Switching maps (or closing the
   // map) leaves it showing the previous map's branch, and select() cannot catch
@@ -1559,6 +1617,7 @@ function render(){
     $('#mapTitle').value='';              // reset title field
     viewport.removeAttribute('data-style');
     viewport.removeAttribute('data-layout');   // reset style/background
+    _treeTableCellSizes = null;
     applyStyleConfigVars(); applyLookConfigVars(); applyThemeConfigVars();   // back to the defaults, not the last map's
     sel=null;
     updateBreadcrumb();                   // hides (no map)
@@ -1570,11 +1629,28 @@ function render(){
   const mapStyle = resolvedMapStyle(map);
   viewport.dataset.style = mapStyle;
   viewport.dataset.layout = map.layout || 'balanced';
+  // Resolve once: the placement engine is also needed after the measure pass
+  // below, because a tree table's cell sizes depend on the text just measured.
+  const _run = layoutRunForMap(map.layout || 'balanced', map.layoutParams, map.layoutConfig);
   // Sketch cards carry a deterministic per-id tilt as --tilt (sketchTiltDeg).
   // Resolved once; only freshly built elements receive it, and a style or
   // styleConfig change lands in _metricsKey, which busts every node signature
   // and rebuilds them - so a cached element can never wear a stale angle.
   const _tiltAmp = mapStyle==='sketch' ? sketchTiltAmp() : 0;
+  // Organic underlines wear their branch's colour and weight. Set on cached
+  // elements too, not only fresh ones: recolouring a main branch changes the
+  // colour of nodes whose own signature has not changed.
+  let _orgVars=null;
+  if(mapStyle==='organic'){
+    const _osc={ ...STYLE_CONFIG_DEFAULTS.organic, ...((map.styleConfig||{}).organic||{}) };
+    const _oi=organicBranchInfo(_osc.edgeColor);
+    _orgVars=(el, id)=>{
+      if(id===map.rootId) return;
+      const c=_oi.color[id]||'', w=organicBranchWidth(_oi.depth[id]||1, _osc.edgeWidth)+'px';
+      if(el.style.getPropertyValue('--branch')!==c) el.style.setProperty('--branch', c);
+      if(el.style.getPropertyValue('--branch-w')!==w) el.style.setProperty('--branch-w', w);
+    };
+  }
   applyStyleConfigVars();
   applyLookConfigVars();
   applyThemeConfigVars();
@@ -1602,21 +1678,54 @@ function render(){
   // Unchanged elements used to be re-appended on EVERY render - a DOM move per
   // node per pass, and a move takes focus away, so a collaborator's edit threw the
   // user out of the node they were typing in. Now nothing moves while the order
-  // still matches the last render; from the first node that differs (new, rebuilt
-  // or reordered) the rest are re-appended in order - except the node being
-  // edited, which keeps its place and its caret.
-  const _order=[]; let _inOrder=true;
-  // nodes
+  // still matches the last render; from the first node that differs (new or
+  // reordered) the rest are re-appended in order - except the node being edited,
+  // which keeps its place and its caret.
+  //
+  // Collect the visible order first so a REBUILT element can go back in at its
+  // own index. Appending it to the end used to flip _inOrder off and re-append
+  // every later element - 1500+ DOM moves, and most of the render time, each
+  // time one early node's text changed (typing commit, task toggle, collapse).
+  //
+  // _allOrder is every node in map order, hidden ones included. That is the
+  // order the DOM follows once hidden elements are removed, and it does NOT
+  // change when a branch is collapsed or expanded - so those passes are not
+  // mistaken for a reorder and do not re-append the whole map.
+  const _order=[], _allOrder=[];
   for(const id in map.nodes){
-    if(hidden.has(id)) continue;
+    _allOrder.push(id);
+    if(!hidden.has(id)) _order.push(id);
+  }
+  // Is the map's own insertion order unchanged since the last render? If so the
+  // existing elements are still in the right relative order and a rebuilt or
+  // newly revealed element only needs inserting before its next visible peer.
+  let _sameOrder=_allOrder.length===_lastNodeOrder.length;
+  if(_sameOrder){
+    for(let i=0;i<_allOrder.length;i++){
+      if(_allOrder[i]!==_lastNodeOrder[i]){ _sameOrder=false; break; }
+    }
+  }
+  let _inOrder=_sameOrder;
+  // Drop last render's cell sizing before measuring, so a tree-table parent
+  // reports its natural text size rather than the tall block it was stretched
+  // to. The class goes back on with fresh numbers at the end of this pass.
+  for(const el of _nodeEls.values()){
+    if(el.classList.contains('tt-cell')){
+      el.classList.remove('tt-cell');
+      el.style.removeProperty('--tt-w');
+      el.style.removeProperty('--tt-h');
+    }
+  }
+  // nodes
+  for(let _oi=0;_oi<_order.length;_oi++){
+    const id=_order[_oi];
     const n=map.nodes[id];
     const hasKids=childrenOf(id).length>0;
     _seen.add(id);
-    if(_inOrder && _lastNodeOrder[_order.length]!==id) _inOrder=false;
-    _order.push(id);
     // The fold badge shows the direct-child count on the branch edge (foldBranchSide(),
     // below) - both must invalidate a cached element: a signature without the count
     // (or the branch side) kept displaying a stale badge while every other field matched.
+    // The badge itself is built further down from these two locals.
     const _kidCount=childrenOf(id).length;
     const _foldSide=hasKids?foldBranchSide(id,n):'';
     const _sig=_nodeSignature(id, n, hasKids, roll, zd, _metricsKey)+'|k'+_kidCount+'|fs'+_foldSide;
@@ -1627,10 +1736,17 @@ function render(){
       // a re-measure.
       _old.style.left=n.x+'px'; _old.style.top=n.y+'px';
       _old.classList.toggle('sel', id===sel);
+      if(_orgVars) _orgVars(_old, id);
       if(!_inOrder && !_old.classList.contains('editing')) viewport.appendChild(_old);
+      // A tree table always re-measures: its cell width/height is derived from
+      // the natural text size, and an element kept across renders still has the
+      // stretched size from the last one. One batched read pass below.
+      //
+      // Also re-measure when the node object itself has no size - see
+      // needsMeasureOnReuse() above.
+      if(needsMeasureOnReuse(_run.strategy, n)) toMeasure.push({el:_old, n});
       continue;
     }
-    _inOrder=false;                     // this element goes to the end: everything after it must follow
     if(_old) _old.remove();
     const el=document.createElement('div');
     el.className='node'+(id===map.rootId?' root':'')+(id===sel?' sel':'')+(hasKids&&n.collapsed?' collapsed':'')+(n.side==='left'?' left':'');
@@ -1659,6 +1775,12 @@ function render(){
         el.style.background = _isInk ? _base : colorFor(_base);
         el.style.color = pickContrast(_isInk ? _base : colorFor(_base));
       }
+    } else if(_orgVars){
+      // Organic has no cards: a node's colour tints its branch instead (see
+      // organicBranchInfo), so paint none here.
+      el.style.background = '';
+      el.style.color = '';
+      _orgVars(el, id);
     } else if(n.color && n.color!=='#fff' && n.color!=='#ffffff'){
       el.style.background = n.color;
       el.style.color = pickContrast(n.color);
@@ -1685,13 +1807,22 @@ function render(){
       // Guarded even though sanitizeMapData() already vets n.image: a javascript:
       // URL here would run in a window that inherits this origin.
       img.addEventListener('dblclick',ev=>{ ev.stopPropagation(); if(safeImageUrl(n.image)) window.open(n.image,'_blank','noopener'); });
-      // If the image can't load, fall back to its alt text so the node isn't a broken icon
+      // If the image can't load, fall back to its alt text so the node isn't a broken icon.
+      // The fallback also changes the node's size: removing .has-image drops the card
+      // back to the normal 240px cap, so the pre-load measurement (taken while the img
+      // had no intrinsic size) is now too short for the text and the next sibling would
+      // overlap it. Re-measure and re-tidy after the DOM settles.
       img.addEventListener('error',()=>{
         img.remove(); el.classList.remove('has-image'); el.classList.add('img-missing');
         const cap=document.createElement('span'); cap.className='img-alt';
         cap.textContent = n.imageAlt || 'image not found';
         el.insertBefore(cap, el.firstChild);
+        remeasureNodeAndReflow(id);
+        updateMinimap();
       });
+      // Same for a successful load: an <img> has no intrinsic size until it arrives,
+      // so the node was measured at its pre-load size.
+      img.addEventListener('load',()=>{ remeasureNodeAndReflow(id); updateMinimap(); });
       el.appendChild(img);
     }
     // Marker badge - click to change, same interaction shape as the task
@@ -1872,7 +2003,18 @@ function render(){
       tb.addEventListener('click',ev=>ev.stopPropagation());
       el.appendChild(tb);
     }
-    viewport.appendChild(el);
+    // Put the element back at its own index when the map's id order is
+    // unchanged. A genuine reorder (add, delete or move mid-list) still appends
+    // this and the rest in sequence, which is what keeps stacking correct.
+    let _next=null;
+    if(_sameOrder){
+      for(let j=_oi+1;j<_order.length;j++){
+        const cand=_nodeEls.get(_order[j]);
+        if(cand && cand.parentElement===viewport){ _next=cand; break; }
+      }
+    }
+    if(_next) viewport.insertBefore(el,_next);
+    else viewport.appendChild(el);
     _nodeEls.set(id, el); _nodeSig.set(id, _sig);
     toMeasure.push({el, n});
   }
@@ -1881,7 +2023,7 @@ function render(){
   for(const [id, el] of _nodeEls){
     if(!_seen.has(id)){ el.remove(); _nodeEls.delete(id); _nodeSig.delete(id); }
   }
-  _lastNodeOrder=_order;
+  _lastNodeOrder=_allOrder;
   // Measure ALL nodes in one pass AFTER appending - reading getBoundingClientRect
   // interleaved with appends forces a layout reflow per node (O(n) thrash). One
   // batched read loop triggers a single reflow. getBoundingClientRect returns
@@ -1891,6 +2033,20 @@ function render(){
   for(const {el, n} of toMeasure){
     const r=el.getBoundingClientRect();
     n.w=r.width/sz; n.h=r.height/sz;
+    // The layout reads these, never the cell-stretched w/h set below: a column
+    // must be sized by its text, not by the previous layout pass.
+    if(_run.strategy==='treetable') rememberNaturalSize(n, n.w, n.h);
+  }
+  // The tree table is re-placed from the sizes just measured. Doing it here,
+  // not only in autoLayout(), is what makes a saved map open with its cells
+  // intact: loadMap() renders without a layout pass, so there would otherwise
+  // be no cell sizes until the user happened to tidy the map.
+  if(_run.strategy==='treetable'){
+    const _cells = layoutTreeTable(map.nodes, map.rootId, childrenOf, _run.params);
+    _treeTableCellSizes = _cells ? { mapId: map.id, cells: _cells } : null;
+    if(_cells) applyTreeTableCells(_cells);
+  } else {
+    _treeTableCellSizes = null;
   }
   drawEdges(hidden);
   positionNodeBar();
@@ -2523,6 +2679,115 @@ function stairEdgePath(p, n){
   const edgeY = ncy >= pcy ? n.y : n.y + (n.h||0);
   return `M${sx},${sy} L${ncx},${sy} L${ncx},${edgeY}`;
 }
+// ── Organic style: Tony Buzan's hand-drawn Mind Map ─────────────────────────
+// Three of Buzan's rules carry the look, and each needs code rather than CSS:
+// every main branch has its own colour, kept by everything that grows from it;
+// branches are thick at the centre and thin out with each level; and every
+// word sits on a line of its own, which the next branches grow out of.
+// drawEdges(), render() and exportPNG() all go through these helpers so the
+// screen and the PNG cannot drift apart.
+//
+// Vivid enough to read as a thin line on a light paper and to stay visible on
+// a dark one. Yellow is a darker gold because pure yellow vanishes on white.
+const ORGANIC_BRANCH_COLORS=['#e53935','#fb8c00','#7cb342','#1e88e5','#8e24aa','#00acc1','#d81b60','#f9a825'];
+// A node's own colour is a pale card tint (NODE_COLORS) picked for a dark text
+// on top of it. As a 2px line that tint disappears, so keep the hue and push
+// saturation and lightness into line range. Greys have no hue to strengthen
+// and only get darker.
+function vividBranchColor(c){
+  const v=parseInt(hex6(c).slice(1),16);
+  const r=(v>>16&255)/255, g=(v>>8&255)/255, b=(v&255)/255;
+  const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2, d=mx-mn;
+  let h=0, s=0;
+  if(d){
+    s=d/(1-Math.abs(2*l-1));
+    h=mx===r ? ((g-b)/d)%6 : mx===g ? (b-r)/d+2 : (r-g)/d+4;
+    h*=60; if(h<0) h+=360;
+  }
+  const S = s<0.08 ? s : Math.max(s, 0.62);
+  const L = Math.min(0.5, Math.max(0.4, l));
+  const C=(1-Math.abs(2*L-1))*S, X=C*(1-Math.abs((h/60)%2-1)), m=L-C/2;
+  const rgb = h<60?[C,X,0]: h<120?[X,C,0]: h<180?[0,C,X]: h<240?[0,X,C]: h<300?[X,0,C]: [C,0,X];
+  return '#'+rgb.map(x=>Math.round((x+m)*255).toString(16).padStart(2,'0')).join('');
+}
+// Line thickness by depth. `base` is the main branch (styleConfig edgeWidth);
+// depth 0 is where a trunk leaves the central topic, about twice that.
+function organicBranchWidth(depth, base){
+  const k = depth<=0 ? 2.2 : [1, 0.5, 0.34, 0.27][Math.min(depth,4)-1];
+  return Math.max(1.2, Math.round(base*k*10)/10);
+}
+// Filled outline of a cubic bezier whose width runs from w1 to w2. Offsetting
+// only the control points along one axis pinches a steep S-curve to nothing in
+// its middle, so this samples the curve and offsets along the true normal.
+// pts = [x1,y1, c1x,c1y, c2x,c2y, x2,y2].
+function taperedBezierPath(pts, w1, w2){
+  const [x1,y1,ax,ay,bx,by,x2,y2]=pts, N=14, L=[], R=[];
+  const f=v=>Math.round(v*10)/10;
+  for(let i=0;i<=N;i++){
+    const t=i/N, u=1-t;
+    const px=u*u*u*x1+3*u*u*t*ax+3*u*t*t*bx+t*t*t*x2;
+    const py=u*u*u*y1+3*u*u*t*ay+3*u*t*t*by+t*t*t*y2;
+    let dx=3*u*u*(ax-x1)+6*u*t*(bx-ax)+3*t*t*(x2-bx);
+    let dy=3*u*u*(ay-y1)+6*u*t*(by-ay)+3*t*t*(y2-by);
+    const len=Math.hypot(dx,dy);
+    if(len<1e-6){ dx=1; dy=0; } else { dx/=len; dy/=len; }
+    const hw=(w1+(w2-w1)*t)/2;
+    L.push(f(px-dy*hw)+','+f(py+dx*hw));
+    R.push(f(px+dy*hw)+','+f(py-dx*hw));
+  }
+  return 'M'+L.join(' L')+' L'+R.reverse().join(' L')+' Z';
+}
+// The tapered branch from parent p to child n for the bezier layouts. In the
+// horizontal ones a branch leaves the END of the parent's underline and lands
+// on the START of the child's, so the curve and the line under each word read
+// as one stroke; a trunk starts just inside the central topic, hidden under
+// it. Vertical layouts keep the caller's attach points (x1..y2).
+function organicEdgePath(p, n, o){
+  let {x1,y1,x2,y2}=o;
+  const {fromRoot, leftSide, horizontal, wp, wn}=o;
+  if(horizontal){
+    const pw=p.w||0, ph=p.h||0;
+    if(fromRoot){
+      const inset=Math.min(12, pw/4);
+      x1 = leftSide ? p.x+inset : p.x+pw-inset;
+      y1 = p.y+ph/2;
+    } else {
+      x1 = leftSide ? p.x : p.x+pw;
+      y1 = p.y+ph-wp/2;
+    }
+    x2 = leftSide ? n.x+(n.w||0) : n.x;
+    y2 = n.y+(n.h||0)-wn/2;
+    const dx=Math.abs(x2-x1)*0.5, s=leftSide?-1:1;
+    return taperedBezierPath([x1,y1, x1+s*dx,y1, x2-s*dx,y2, x2,y2], wp, wn);
+  }
+  const dy=Math.abs(y2-y1)*0.5, s=y2>y1?1:-1;
+  return taperedBezierPath([x1,y1, x1,y1+s*dy, x2,y2-s*dy, x2,y2], wp, wn);
+}
+// Depth and branch colour of every node, in one indexed pass. A main branch
+// takes its own colour when it has one (made line-strength), else the next
+// palette entry; its whole subtree inherits that. A styleConfig edgeColor
+// overrides the lot, for anyone who wants one ink. Colours on deeper nodes
+// are not consulted: maps made in the card styles carry a random tint on
+// every node, and honouring those would turn every sub-branch a new colour.
+function organicBranchInfo(override){
+  return withChildIndex(()=>{
+    const depth=zebraDepth(), color=Object.create(null);
+    if(!map || !map.nodes[map.rootId]) return {depth, color};
+    childrenOf(map.rootId).forEach((id,i)=>{
+      const own=map.nodes[id].color;
+      const c = override
+        || (own && !/^#fff(fff)?$/i.test(own) ? vividBranchColor(own) : ORGANIC_BRANCH_COLORS[i % ORGANIC_BRANCH_COLORS.length]);
+      const stack=[id];
+      while(stack.length){
+        const k=stack.pop();
+        if(color[k]) continue;   // a cycle repairTree() missed must not spin
+        color[k]=c;
+        for(const ch of childrenOf(k)) stack.push(ch);
+      }
+    });
+    return {depth, color};
+  });
+}
 function drawEdges(hidden){
   const style=resolvedMapStyle(map);
   const layout=map.layout||'balanced';
@@ -2532,9 +2797,14 @@ function drawEdges(hidden){
   // from the style config. Resolved once per pass - it was rebuilt for every edge.
   const _sc = { ...STYLE_CONFIG_DEFAULTS[style], ...((map.styleConfig || {})[style] || {}) };
   const _edgeDash = _sc.dash > 0 ? `${_sc.dash} ${Math.max(2, Math.round(_sc.dash * 0.7))}` : null;
+  const _org = style==='organic' ? organicBranchInfo(_sc.edgeColor) : null;
   for(const id in map.nodes){
     const n=map.nodes[id]; if(!n.parent||hidden.has(id)||hidden.has(n.parent)) continue;
     const p=map.nodes[n.parent]; if(!p) continue;
+    // Tree table reads from the grid itself: the spanning block already says
+    // which cells belong together, and stubs between columns only add noise.
+    // Cross-links below are still drawn, being explicit references.
+    if(layout==='treetable') continue;
     // Choose attach points based on layout orientation
     let x1,y1,x2,y2,horizontal=true,leftSide=(n.side==='left'),d;
     if(layout==='timeline' && n.parent!==map.rootId){
@@ -2604,7 +2874,23 @@ function drawEdges(hidden){
         x2=leftSide ? n.x+(n.w||0) : n.x;
         y2=n.y+(n.h||0)/2;
       }
+      if(_org){
+        // A filled shape, not a stroke: a stroke cannot change width along
+        // its length. Its own colour per branch, so it merges by colour only.
+        const wp=organicBranchWidth(_org.depth[n.parent]||0, _sc.edgeWidth);
+        const wn=organicBranchWidth(_org.depth[id]||1, _sc.edgeWidth);
+        d = organicEdgePath(p, n, {x1,y1,x2,y2, fromRoot:n.parent===map.rootId, leftSide, horizontal, wp, wn});
+        segs.push({d, color:_org.color[id]||'var(--line-2)', width:null, dash:null, fill:true});
+        continue;
+      }
       d = edgePath(x1,y1,x2,y2,leftSide,horizontal,style);
+    }
+    if(_org){
+      // Timeline, stair, radial, grid and matrix draw elbows and spokes of
+      // their own; those keep their shape and take the branch colour and the
+      // child's line weight.
+      segs.push({d, color:_org.color[id]||'var(--line-2)', width:organicBranchWidth(_org.depth[id]||1, _sc.edgeWidth), dash:null});
+      continue;
     }
     // Stroke settings per style: colour (null → CSS var), width (null → CSS
     // var), dash (null → solid). Dashed dashes, Minimal thins - the rest keep
@@ -2619,7 +2905,7 @@ function drawEdges(hidden){
   // on, minimal: thin) multiply the element count.
   const merged=new Map();
   for(const s of segs){
-    const key=s.color+'|'+s.width+'|'+(s.dash||'');
+    const key=s.color+'|'+s.width+'|'+(s.dash||'')+(s.fill?'|fill':'');
     merged.set(key, (merged.get(key)||'')+' '+s.d);
   }
   // Cross-links: non-tree edges (references / dependencies). Drawn as separate
@@ -2652,8 +2938,12 @@ function drawEdges(hidden){
 // as invisible edges (SVG ignores stroke="null", defaulting to none).
 function edgePathsHTML(merged){
   return [...merged].map(([key,d])=>{
-    const [color,width,dash]=key.split('|');
+    const [color,width,dash,mode]=key.split('|');
     const stroke = (color && color!=='null') ? color : 'var(--edge-color, var(--line-2))';
+    // Organic branches are closed tapered outlines. The hairline stroke in the
+    // same colour closes the anti-aliasing seam where a branch meets the line
+    // under its word.
+    if(mode==='fill') return `<path d="${d}" fill="${stroke}" stroke="${stroke}" stroke-width="0.6" stroke-linejoin="round"/>`;
     const sw     = (width && width!=='null') ? width : 'var(--edge-width, 2.2)';
     return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round"${dash&&dash!=='null'?` stroke-dasharray="${dash}"`:''}/>`;
   }).join('');
@@ -2662,7 +2952,7 @@ function edgePathsHTML(merged){
 // `label` property. Positioned at the midpoint of the parent-child connection,
 // offset above the line. Only horizontal (balanced/right/left) layouts supported.
 function buildEdgeLabels(hidden, layout){
-  if(layout==='radial' || layout==='grid' || layout==='matrix') return '';
+  if(layout==='radial' || layout==='grid' || layout==='matrix' || layout==='treetable') return '';
   let svg='';
   for(const id in map.nodes){
     const n=map.nodes[id]; if(!n.label || hidden.has(id)) continue;
@@ -2753,6 +3043,9 @@ let _bpPanel=null; // open Build Prompt panel, if any
 const EMPTY_KIDS=Object.freeze([]);
 function buildChildIndex(){
   const idx=Object.create(null);
+  // withChildIndex() also wraps renderOutline(), which runs at boot and on the
+  // empty state, before any map is open.
+  if(!map) return idx;
   for(const id in map.nodes){
     const p=map.nodes[id].parent;
     if(p==null) continue;
@@ -3107,6 +3400,10 @@ const LAYOUT_CONFIG_DEFAULTS = {
     start: 'above',     // which side the first step's sub-topics take
   },
   matrix: { colGap:40, rowGap:24, cellGap:10, headGap:60 },
+  // stretchLeaves makes a childless cell span every remaining depth column, the
+  // way a table row's last cell fills to the edge. Off by default so existing
+  // charts keep their inset cards; the enclosed preset turns it on.
+  treetable: { colGap:16, rowGap:6, rootSide:'left', stretchLeaves:false },
   fishbone: {
     gap: 70,            // gap between consecutive spine items
     stem: 30,           // clearance between the spine and a rib's sub-topic block
@@ -3129,6 +3426,7 @@ const LAYOUT_CONFIG_BOUNDS = {
   timeline: { gap:[8,400], stem:[0,300], indent:[0,300] },
   stair:    { gap:[8,400], stem:[0,300], indent:[0,300] },
   matrix:   { colGap:[8,300], rowGap:[8,300], cellGap:[0,120], headGap:[8,300] },
+  treetable:{ colGap:[0,300], rowGap:[0,120] },
   fishbone: { gap:[8,400], stem:[0,300], indent:[0,300], angle:[10,170] },
 };
 
@@ -3152,6 +3450,10 @@ function validateLayoutConfig(raw){
     if(engine === 'timeline' || engine === 'fishbone' || engine === 'stair'){
       if(typeof sec.alternate === 'boolean') out[engine].alternate = sec.alternate;
       if(sec.start === 'above' || sec.start === 'below') out[engine].start = sec.start;
+    }
+    if(engine === 'treetable'){
+      if(['left','right','top','bottom'].includes(sec.rootSide)) out[engine].rootSide = sec.rootSide;
+      if(typeof sec.stretchLeaves === 'boolean') out[engine].stretchLeaves = sec.stretchLeaves;
     }
   }
   return out;
@@ -3477,6 +3779,164 @@ function layoutMatrix(nodes, rootId, kidsOf, opts){
 }
 
 /* ------------------------------------------------------------
+   Tree table placement - depth becomes a column, every cell spans the
+   height of its own subtree.
+
+   This is XMind's tree table rather than a spreadsheet: the columns are
+   structural (depth 1, depth 2, ...), and a parent's block covers every row
+   beneath it. That is what lets a phase sit beside one date and a whole list of
+   to-dos while still reading as one group, which a matrix cannot express - a
+   matrix aligns row N across columns instead of letting one cell span rows.
+
+   Blocks are measured bottom-up, then placed top-down. A node is centred in its
+   own block, so a parent points at the middle of its children without any extra
+   connector pass.
+
+   A childless cell is the end of a branch, so with stretchLeaves it also spans
+   every depth column still to its right (or below, when the table is turned on
+   its side). That is the tree-table equivalent of a colspan: a table is a
+   rectangle, and a row that stops at its own column leaves a ragged edge. The
+   columns themselves are sized only by the cells that have to live in one, so a
+   long leaf does not widen its own column just because it reaches the edge.
+   Collapsed nodes count as leaves, because that is what they are on screen.
+
+   Mutates x/y/side on the given nodes.
+   ------------------------------------------------------------ */
+function layoutTreeTable(nodes, rootId, kidsOf, opts){
+  if(!nodes[rootId]) return;
+  const colGap = opts.colGap != null ? opts.colGap : 16;
+  const rowGap = opts.rowGap != null ? opts.rowGap : 6;
+  const stretchLeaves = opts.stretchLeaves === true;
+  // Where the root band sits. The table is depth along one axis and sibling
+  // blocks along the other, so 'top'/'bottom' turn it on its side rather than
+  // mirroring a finished grid. An unknown value falls through to the left form.
+  const rootSide = opts.rootSide;
+  const vertical = rootSide === 'top' || rootSide === 'bottom';
+  const childSide = rootSide === 'right' ? 'left'
+    : rootSide === 'top' ? 'down'
+    : rootSide === 'bottom' ? 'up'
+    : 'right';
+
+  // A collapsed node is a leaf here, exactly as it is on screen.
+  const visibleKids = id => (nodes[id].collapsed ? [] : kidsOf(id));
+  // While a map is in tree table, w/h hold the stretched cell size. The natural
+  // text size is kept beside them so a later pass sizes rows and columns by
+  // content instead of feeding a stretched cell back into itself.
+  const naturalW = n => n._nw || n.w || 120;
+  const naturalH = n => n._nh || n.h || 40;
+  const cells = new Map();
+
+  // Span of the sibling axis owned by a node's block: its own card, or the
+  // stacked blocks of its children when those are larger. Horizontally that is
+  // a height, vertically a width. Memoised because placement asks for the same
+  // spans repeatedly on a deep map.
+  const spanCache = new Map();
+  const blockSpan = id => {
+    if(spanCache.has(id)) return spanCache.get(id);
+    const n = nodes[id], cs = visibleKids(id);
+    let span = vertical ? naturalW(n) : naturalH(n);
+    if(cs.length){
+      let sum = 0;
+      cs.forEach((c, i) => { sum += blockSpan(c) + (i ? rowGap : 0); });
+      span = Math.max(span, sum);
+    }
+    spanCache.set(id, span);
+    return span;
+  };
+
+  // One thickness per depth: the widest card at a level when depth runs
+  // sideways, the tallest when it runs down. Every row starts on the same line,
+  // which is what makes this a table rather than a tree.
+  //
+  // A stretched leaf does not need a column of its own, so it is measured
+  // separately. Only cells that stop in their column can force that column
+  // wider; leaf widths constrain the table's total width instead.
+  const thickness = [];   // cells that must fit inside one depth column
+  const leafMain = [];    // childless cells that may span to the far edge
+  const measureDepths = (id, depth) => {
+    const n = nodes[id];
+    const main = vertical ? naturalH(n) : naturalW(n);
+    const cs = visibleKids(id);
+    if(stretchLeaves && !cs.length){
+      leafMain[depth] = Math.max(leafMain[depth] || 0, main);
+    } else {
+      thickness[depth] = Math.max(thickness[depth] || 0, main);
+    }
+    cs.forEach(c => measureDepths(c, depth + 1));
+  };
+  measureDepths(rootId, 0);
+  if(stretchLeaves){
+    // Thickness entries can be missing where every node at a depth is a leaf.
+    // Fill them so the cumulative positions below stay numeric.
+    const last = Math.max(thickness.length, leafMain.length) - 1;
+    for(let d = 0; d <= last; d++) thickness[d] = thickness[d] || 0;
+    // The deepest column holds the leaves that cannot span any further, so it
+    // must fit the widest of them. Then a shallower leaf may still be wider
+    // than every column left of the edge combined; widen the far column by the
+    // deficit, which keeps all right edges aligned while making room for it.
+    thickness[last] = Math.max(thickness[last], leafMain[last] || 0);
+    for(let d = last - 1; d >= 0; d--){
+      let span = 0;
+      for(let k = d; k <= last; k++) span += thickness[k] + (k > d ? colGap : 0);
+      if((leafMain[d] || 0) > span) thickness[last] += (leafMain[d] || 0) - span;
+    }
+  }
+  const depthPos = [];
+  let main = 0;
+  for(let d = 0; d < thickness.length; d++){ depthPos[d] = main; main += thickness[d] + colGap; }
+  const tableMain = main - colGap;
+
+  const place = (id, depth, cross) => {
+    const n = nodes[id];
+    const span = blockSpan(id);
+    const cs = visibleKids(id);
+    // A leaf takes everything left to the far edge; a parent stops at its own
+    // column so its children have somewhere to start. tableMain is already the
+    // final edge, so this needs no second pass after the mirror below.
+    const mainSize = (stretchLeaves && !cs.length) ? tableMain - depthPos[depth] : thickness[depth];
+    n.side = depth === 0 ? 'root' : childSide;
+    if(vertical){
+      n.x = cross;
+      n.y = depthPos[depth];
+      cells.set(id, { x: cross, y: depthPos[depth], w: span, h: mainSize });
+    } else {
+      n.x = depthPos[depth];
+      n.y = cross;
+      cells.set(id, { x: depthPos[depth], y: cross, w: mainSize, h: span });
+    }
+
+    if(!cs.length) return;
+    let childSpan = 0;
+    cs.forEach((c, i) => { childSpan += blockSpan(c) + (i ? rowGap : 0); });
+    // Children sit in the middle of a parent block that is larger than its
+    // subtree, matching the parent's own centring.
+    let cpos = cross + (span - childSpan) / 2;
+    cs.forEach(c => { place(c, depth + 1, cpos); cpos += blockSpan(c) + rowGap; });
+  };
+
+  place(rootId, 0, 0);
+
+  // Mirror the finished grid so the root moves to the opposite edge. Every
+  // subtree span and sibling order stays identical; computing a second
+  // placement walk per side would repeat the same code and drift.
+  if(rootSide === 'right'){
+    for(const [id, c] of cells){
+      c.x = tableMain - (c.x + c.w);
+      nodes[id].x = c.x;
+    }
+  } else if(rootSide === 'bottom'){
+    for(const [id, c] of cells){
+      c.y = tableMain - (c.y + c.h);
+      nodes[id].y = c.y;
+    }
+  }
+
+  // The caller stretches each node to its cell; render() and autoLayout() both
+  // need the same map, and returning it keeps the engine free of app state.
+  return cells;
+}
+
+/* ------------------------------------------------------------
    Grid placement - root children as cards in a grid, each with its
    sub-tree as an indented outline beneath it.
 
@@ -3698,7 +4158,13 @@ function autoLayout(noRender){
   // "collapse/expand all" ease into place instead of jumping. render() clears and rebuilds
   // node DOM elements from scratch, so a plain CSS left/top transition can't apply here -
   // this replays the movement manually via a transform on the fresh elements instead.
-  const _beforePos={}; for(const id in map.nodes){ const n=map.nodes[id]; _beforePos[id]={x:n.x,y:n.y}; }
+  // Skipped for the live edit reflow (noRender): that pass moves existing elements and
+  // never animates, so allocating an entry per node would be pure waste.
+  let _beforePos=null;
+  if(!noRender){
+    _beforePos={};
+    for(const id in map.nodes){ const n=map.nodes[id]; _beforePos[id]={x:n.x,y:n.y}; }
+  }
   try{
   // Render-to-measure only if some visible node has no measured size yet (e.g.
   // it was just revealed by expanding). This avoids a full extra render on every
@@ -3709,29 +4175,27 @@ function autoLayout(noRender){
   const root=map.nodes[map.rootId];
   root.side='root';
   const layout = map.layout || 'balanced';
-  // Spacing comes from this map's config. Local names, so the module constants
-  // stay the defaults and other callers (drag-insertion, FLIP) are unaffected.
-  const _lc = validateLayoutConfig(map.layoutConfig)[layout] || LAYOUT_CONFIG_DEFAULTS.balanced;
-  const LH = (_lc.hGap != null) ? _lc.hGap : HGAP;
-  const LV = (_lc.vGap != null) ? _lc.vGap : VGAP;
 
   // ----- PLACEMENT -----
   // One dispatch for every layout: resolve to a strategy plus a complete
   // parameter set, then run it. Adding a layout is now a table entry rather
   // than another branch here.
-  const _run = resolveLayout(layout, map.layoutParams);
-  const _p = { ..._run.params };
-  // The per-map spacing config still applies on top, so the settings dialog
-  // keeps working for the built-ins.
-  const _cfg = validateLayoutConfig(map.layoutConfig)[layout];
-  if(_cfg){
-    if(_cfg.hGap != null && _run.strategy === 'tree'){
-      if(_p.axis === 'y'){ _p.gapCross = _cfg.hGap; _p.gapMain = _cfg.vGap; }
-      else { _p.gapMain = _cfg.hGap; _p.gapCross = _cfg.vGap; }
-    }
-    for(const k of ['gap','stem','indent','alternate','start','ring','startAngle','sweep',
-                    'columns','gapX','gapY','rowGap','angle','colGap','cellGap','headGap']){
-      if(_cfg[k] !== undefined) _p[k] = _cfg[k];
+  const _run = layoutRunForMap(layout, map.layoutParams, map.layoutConfig);
+  const _p = _run.params;
+  // Leaving the tree table: w/h currently hold stretched cell sizes. Restore
+  // the natural text sizes first, or the next layout would place cards as wide
+  // as the table columns they used to fill.
+  if(_run.strategy !== 'treetable'){
+    for(const id in map.nodes){
+      const n = map.nodes[id];
+      // Only nodes that carry a natural-size cache need touching. The old
+      // loop ran two deletes on every node in the map, cache or not.
+      if(n._nw > 0){
+        n.w = n._nw; if(n._nh > 0) n.h = n._nh;
+        // The natural size is now on w/h, so the cache would only go stale after
+        // a resize in another layout. Drop it; the next treetable render refills.
+        delete n._nw; delete n._nh;
+      }
     }
   }
   // Theme size multiplies only the spacing knobs, never enums/angles/columns.
@@ -3743,9 +4207,14 @@ function autoLayout(noRender){
       if(typeof _p[k] === 'number') _p[k] = Math.max(0, Math.round(_p[k] * _sizeScale));
     }
   }
-  ({ tree: layoutTree, chain: layoutChain, radial: layoutRadial, grid: layoutGrid,
-     matrix: layoutMatrix }[_run.strategy])
+  const _cells = ({ tree: layoutTree, chain: layoutChain, radial: layoutRadial, grid: layoutGrid,
+     matrix: layoutMatrix, treetable: layoutTreeTable }[_run.strategy])
     (map.nodes, map.rootId, childrenOf, _p);
+  if(_run.strategy === 'treetable'){
+    _treeTableCellSizes = _cells ? { mapId: map.id, cells: _cells } : null;
+  } else {
+    _treeTableCellSizes = null;
+  }
   if(!noRender){ render(); scheduleSave(); flipAnimateNodes(_beforePos); } return;
   if(!noRender){ render(); scheduleSave(); flipAnimateNodes(_beforePos); }
   } finally { _ci=_prevCI; }
@@ -3757,24 +4226,47 @@ function autoLayout(noRender){
 // caret/selection intact.
 function paintPositions(hidden){
   hidden = hidden || hiddenSet();
-  document.querySelectorAll('.node').forEach(el=>{
-    const n=map.nodes[el.dataset.id];
-    if(n){ el.style.left=n.x+'px'; el.style.top=n.y+'px'; }
-  });
+  // _nodeEls is render()'s own id -> element map, the same idiom the drag path
+  // uses: no DOM scan and no data-attribute read per node on every frame.
+  for(const [id, el] of _nodeEls){
+    const n=map.nodes[id];
+    if(!n) continue;
+    el.style.left=n.x+'px'; el.style.top=n.y+'px';
+  }
   drawEdges(hidden);
   repositionNodeBar();
 }
-// Re-measure the node being edited, recompute the tidy layout, and paint it.
-// Keeps the map neat as the node grows while typing (the way GitMind reflows).
-function relayoutDuringEdit(id){
+// Re-measure one node straight from the DOM and repaint the layout without
+// rebuilding it, so a node that changes size in place (typing inside it, an
+// attached image arriving or failing) never leaves neighbours placed for its
+// old size.
+function remeasureNodeAndReflow(id){
   if(!map) return;
   const el=document.querySelector(`.node[data-id="${id}"]`);
   if(!el) return;
   const n=map.nodes[id]; if(!n) return;
   const sz=view.k*_uiZ();
+  const _run = layoutRunForMap(map.layout || 'balanced', map.layoutParams, map.layoutConfig);
+  // A tree-table cell is stretched to its block, and that stretched height is
+  // not the text's height. Drop the cell sizing for this one measurement so a
+  // growing paragraph widens its column, then put the fresh cells back below.
+  const wasCell=el.classList.contains('tt-cell');
+  if(wasCell){
+    el.classList.remove('tt-cell');
+    el.style.removeProperty('--tt-w');
+    el.style.removeProperty('--tt-h');
+  }
   const r=el.getBoundingClientRect();
-  n.w=r.width/sz; n.h=r.height/sz;
+  const w=r.width/sz, h=r.height/sz;
+  // Nothing moved. Skipping the layout pass matters for an image whose load
+  // event arrives after render already measured the same final size.
+  if(!wasCell && Math.abs(w-(n.w||0))<0.5 && Math.abs(h-(n.h||0))<0.5) return;
+  n.w=w; n.h=h;
+  if(_run.strategy==='treetable') rememberNaturalSize(n, n.w, n.h);
   autoLayout(true);   // positions only - no DOM rebuild
+  if(_run.strategy==='treetable' && _treeTableCellSizes && _treeTableCellSizes.mapId===map.id){
+    applyTreeTableCells(_treeTableCellSizes.cells);
+  }
   paintPositions();   // shift existing elements + redraw edges
 }
 
@@ -4171,31 +4663,17 @@ function mdToggleWrap(){
   mdRefreshDecorations();
 }
 // "Download PDF": renders the full markdown into a dedicated print-only container and
-// hands off to the browser's native print dialog (Save as PDF works everywhere without
-// pulling in a PDF-generation library, keeping this a zero-dependency app). Print-specific
-// CSS (see styles.css) hides the rest of the app and forces light, ink-friendly colors
+// hands off to the browser's native print dialog via printOnly(). Print-specific CSS
+// (see styles.css) hides the rest of the app and forces light, ink-friendly colors
 // regardless of the active theme.
 function mdDownloadPdf(){
   if(!map) return;
-  let root=document.getElementById('mdPrintRoot');
-  if(!root){ root=document.createElement('div'); root.id='mdPrintRoot'; document.body.appendChild(root); }
   // No separate title heading here - the root/center node's own text is already the
   // document's first H1 (via buildMarkdown -> mdToHtml), so adding map.title on top of
   // that would just duplicate or mismatch it. The center node itself is never touched.
-  root.innerHTML=mdToHtml(_mdFullText);   // full text: PDF export isn't affected by folds
-  const oldTitle=document.title;
-  const suggestedName=(map.title||'mindmap').replace(/[\\/:*?"<>|]/g,'').trim()||'mindmap';
-  document.title=suggestedName;   // browsers use this as the suggested "Save as PDF" filename
-  document.body.classList.add('md-printing');
-  let cleaned=false;
-  const cleanup=()=>{
-    if(cleaned) return; cleaned=true;
-    document.body.classList.remove('md-printing');
-    document.title=oldTitle;
-    window.removeEventListener('afterprint', cleanup);
-  };
-  window.addEventListener('afterprint', cleanup);
-  setTimeout(()=>{ window.print(); setTimeout(cleanup, 1000); }, 30);   // tiny delay lets the print layout settle first
+  printOnly('mdPrintRoot', 'md-printing', root=>{
+    root.innerHTML=mdToHtml(_mdFullText);   // full text: PDF export isn't affected by folds
+  });
 }
 // ---- Folding: outline depth per line, independent of the full parser ----
 // Mirrors parseMarkdownOutline()'s nesting rules (heading level; bullet indent relative
@@ -4398,6 +4876,23 @@ function mdRefreshDecorations(){
   // trigger another full refresh. Re-measure once more next frame to catch that.
   requestAnimationFrame(()=>{ if(document.getElementById('mdEditor')) mdSyncGutterRowHeights(hl, gut); });
 }
+// The textarea can grow a classic scrollbar, which narrows its content box by the
+// scrollbar's width; the overlay has no scrollbar of its own, so it would keep the full
+// width and, with word wrap on, wrap every line later than the textarea does. The
+// difference accumulates down the document (about 16 lines by the end of a long README),
+// so the caret and the active row drift apart and the row background paints across the
+// scrollbar strip. Match the overlay to the textarea's client width, which already
+// excludes the scrollbar and includes the padding both layers share, before any row
+// height is measured from it.
+function mdSyncOverlayWidth(){
+  const ed=document.getElementById('mdEditor'), hl=document.querySelector('#mdPane .md-hl');
+  if(!ed || !hl) return;
+  const w=ed.clientWidth;
+  if(w<=0) return;                    // pane hidden or mid-transition: keep the last usable width
+  if(hl.style.width===w+'px') return;
+  hl.style.width=w+'px';
+  hl.style.right='auto';              // inset:0's right would otherwise over-constrain the width
+}
 // Each .gl gutter row is normally a fixed 20px (one Markdown line = one visual row). Once
 // word wrap is on, a line can span several visual rows, so its .gl row needs to grow to
 // match - otherwise every row below it drifts further out of alignment with the text it
@@ -4405,6 +4900,7 @@ function mdRefreshDecorations(){
 // .gl heights (rather than interleaving read/write per row), so this doesn't force a
 // separate synchronous layout reflow for every single line.
 function mdSyncGutterRowHeights(hl, gut){
+  mdSyncOverlayWidth();   // width first: a scrollbar appearing changes where every row wraps
   if(!mdWrap) return;
   hl = hl || document.querySelector('#mdPane .md-hl-inner');
   gut = gut || document.querySelector('#mdPane .md-gutter-inner');
@@ -4612,7 +5108,8 @@ function toggleMdMode(on){
 // edit instead. restore() must put back every field listed here.
 function historySnapshot(){
   return JSON.stringify({nodes:map.nodes,rootId:map.rootId,title:map.title,color:map.color,links:map.links||[],layout:map.layout,vars:map.vars||{},
-    style:map.style, themeSize:map.themeSize, layoutPreset:map.layoutPreset, layoutConfig:map.layoutConfig, styleConfig:map.styleConfig,
+    style:map.style, themeSize:map.themeSize, layoutPreset:map.layoutPreset, layoutParams:map.layoutParams,
+    layoutConfig:map.layoutConfig, styleConfig:map.styleConfig,
     lookConfig:map.lookConfig, themeConfig:map.themeConfig});
 }
 function pushHistory(){
@@ -4631,7 +5128,7 @@ function updateUndo(){ $('#undo').disabled=hpos<=0; $('#redo').disabled=hpos>=hi
 function restore(s){ const o=JSON.parse(s); const _prevThemeSize=map.themeSize; map.nodes=o.nodes; map.rootId=o.rootId; map.title=o.title; map.color=o.color; if(o.links) map.links=o.links; if(o.layout) map.layout=o.layout; if(o.vars) map.vars=o.vars;
   // Absent in the snapshot means absent on the map: a setting the user had just
   // added must go away on undo, so these are assigned, not guarded.
-  map.style=o.style; map.themeSize=o.themeSize; map.layoutPreset=o.layoutPreset; map.layoutConfig=o.layoutConfig; map.styleConfig=o.styleConfig; map.lookConfig=o.lookConfig; map.themeConfig=o.themeConfig;
+  map.style=o.style; map.themeSize=o.themeSize; map.layoutPreset=o.layoutPreset; map.layoutParams=o.layoutParams; map.layoutConfig=o.layoutConfig; map.styleConfig=o.styleConfig; map.lookConfig=o.lookConfig; map.themeConfig=o.themeConfig;
   // A theme-size change also changes node padding, so invalidate the cached
   // w/h. autoLayout() re-renders and re-measures before it reads them, instead
   // of laying out from the previous padding's sizes and overlapping cards.
@@ -4653,6 +5150,9 @@ function addNode(parentId,asSibling){
   // the no-explicit-colour sentinel render() resolves to --card-bg, so a new
   // node matches the cards around it instead of standing out with a random
   // palette pick.
+  // Terminal and Organic read the same sentinel: neither paints a card, and
+  // organicBranchInfo() treats '#fff' as "no colour" so a new main branch gets
+  // the next distinct palette colour rather than a random tint.
   map.nodes[id]={id,text:'New topic',parent,
     x:pn.x+(side==='left'?-180:180),y:pn.y+40,side, created:Date.now(), color:'#fff'};
   if(pn.collapsed) pn.collapsed=false;
@@ -5283,6 +5783,8 @@ function showStyleConfigForm(){
         uniform card padding (0 = the style's own padding); glow adds a
         colored glow to nodes; dash adds a dash pattern to edges;
         tilt is the sketch style's per-card angle in degrees (0 = none).
+        In Organic, edgeWidth is the main branch thickness and an edgeColor
+        replaces the per-branch colours with one.
         Out-of-range values are clamped and
         unknown keys ignored, so what you get back may differ from what you
         type.</div>
@@ -5529,6 +6031,27 @@ function imageHasAlpha(ctx, w, h){
   }catch(e){}
   return false;
 }
+// The stored size of an attachment. It is kept at up to 3x the 400px display
+// cap (.node.has-image in styles.css): it used to be cut to 360px, which is
+// 1:1 only at 100% zoom on a 1x screen, so on a HiDPI display or zoomed in a
+// diagram was blown up ~3x from what was stored and its small text became
+// unreadable (issue #61). Pixels dropped here cannot be recovered later.
+function imageAttachSize(w,h){
+  const MAX=1200;
+  const s=Math.min(1, MAX/w, MAX*2/h);   // a very tall image is capped too
+  return { w:Math.max(1,Math.round(w*s)), h:Math.max(1,Math.round(h*s)) };
+}
+// JPEG has no alpha: re-encoding a transparent PNG, GIF or WebP as JPEG
+// turned every transparent pixel black, so any transparency means PNG.
+// Otherwise keep the smaller encoding: diagrams and screenshots are flat
+// colour, where PNG is lossless and usually smaller and JPEG smears small
+// text; photos are the reverse.
+function encodeImageAttachment(cv,cx,w,h){
+  const png=cv.toDataURL('image/png');
+  if(imageHasAlpha(cx,w,h)) return png;
+  const jpg=cv.toDataURL('image/jpeg',0.85);
+  return jpg.length<png.length ? jpg : png;
+}
 function readImageFile(file,id){
   if(!file.type.startsWith('image/')){ toast('Not an image file'); return; }
   const target=map;   // the image belongs to the node on THIS map, even if loading takes a while
@@ -5538,17 +6061,15 @@ function readImageFile(file,id){
     img.onload=()=>{
       // Down-scale to a sane max so the data-URL stays small (esp. for cloud/GitHub storage)
       if(map!==target || !map.nodes[id]){ toast('The map changed before the image finished loading - attach it again'); return; }
-      const MAX=360;
-      let w=img.width,h=img.height;
-      if(w>MAX){ h=Math.round(h*MAX/w); w=MAX; }
-      if(h>MAX*2){ w=Math.max(1,Math.round(w*MAX*2/h)); h=MAX*2; }   // a very tall image is capped too
+      const {w,h}=imageAttachSize(img.width,img.height);
       const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
       const cx=cv.getContext('2d');
+      // The default 'low' smoothing turns thin lines and small text jagged
+      // when a large screenshot is shrunk a long way in one step.
+      cx.imageSmoothingQuality='high';
       cx.drawImage(img,0,0,w,h);
-      // JPEG has no alpha: re-encoding a transparent PNG, GIF or WebP as JPEG
-      // turned every transparent pixel black. Keep PNG when there is any.
       let data;
-      try{ data=cv.toDataURL(imageHasAlpha(cx,w,h) ? 'image/png' : 'image/jpeg', 0.82); }catch(e){ data=reader.result; }
+      try{ data=encodeImageAttachment(cv,cx,w,h); }catch(e){ data=reader.result; }
       map.nodes[id].image=data;
       // autoLayout(), not just render(): the node grows to fit the image, and
       // its neighbours' positions were computed for the old, smaller size -
@@ -5921,7 +6442,7 @@ function _insertFormulaSuggestion(){
   _setCaretTextOffset(textEl, replaceStart+insertion.length);
   closeFormulaAutocomplete();
   textEl.focus();
-  relayoutDuringEdit(nodeId);
+  remeasureNodeAndReflow(nodeId);
 }
 function updateFormulaAutocomplete(textEl, nodeId){
   const text=textEl.textContent||'';
@@ -6046,7 +6567,7 @@ function startEdit(id, seed){
     // Keep the map tidy as the node grows (GitMind-style live reflow), throttled
     // to one re-layout per animation frame so typing stays smooth.
     if(_editRAF) cancelAnimationFrame(_editRAF);
-    _editRAF=requestAnimationFrame(()=>{ _editRAF=0; relayoutDuringEdit(id); });
+    _editRAF=requestAnimationFrame(()=>{ _editRAF=0; remeasureNodeAndReflow(id); });
   };
   // The composed text lands as one chunk here, and no `input` event follows it
   // in every browser - so this is where the skipped work is made up.
@@ -7320,8 +7841,8 @@ function minimapJump(clientX, clientY){
 
 /* ============================================================
    BREADCRUMB - clickable path from root to the selected node.
-   Hidden by default; expands while hovering the overview chip
-   in the status bar (visibility handled by syncBreadcrumb).
+   Visible whenever the selection has a path; focus mode hides
+   it (visibility handled by syncBreadcrumb).
    ============================================================ */
 function updateBreadcrumb(){
   const bc=_breadcrumbEl; if(!bc) return;
@@ -7347,15 +7868,20 @@ function updateBreadcrumb(){
 }
 function syncBreadcrumb(){
   const bc=_breadcrumbEl; if(!bc) return;
-  // Classic shell (as upstream): the breadcrumb is always visible once the
-  // selection has a path; the modern shell expands it only while hovering
-  // the overview chip in the status bar, and focus mode hides the overview
-  // so it stays tucked away there too.
-  const classic = document.body.classList.contains('ui-classic') || document.body.classList.contains('ui-rail') || document.body.classList.contains('ui-zen');
-  const show = !!bc._has && (classic ? !document.body.classList.contains('focus-mode') : !!bc._ov);
+  // The path is a readout, not a hover affordance: it says where the selection
+  // sits even when the pointer is nowhere near the chrome. Modern bars used to
+  // reveal it only while the overview chip was hovered, but that chip is at the
+  // far end of the bottom bar while the pill floats at the top of the canvas,
+  // so the breadcrumb stayed invisible during normal work. Show it whenever a
+  // path exists there. The docked shells keep their hover reveal, and focus
+  // mode hides it because the chrome it belongs to is gone.
+  const b=document.body.classList;
+  const hoverReveal=b.contains('ui-dock') || b.contains('ui-split') || b.contains('ui-minimal') || b.contains('ui-outline');
+  const show=!!bc._has && !b.contains('focus-mode') && (!hoverReveal || !!bc._ov);
   bc.classList.toggle('shown', show);
 }
-// Overview chip: hovering it (or tabbing into its controls) expands the breadcrumb.
+// Overview chip: hovering it (or tabbing into its controls) expands the
+// breadcrumb in the docked shells, whose compact chrome still hides it by default.
 (function(){
   const ov=$('#overview'); if(!ov) return;
   const set=v=>{ const bc=_breadcrumbEl; if(bc) bc._ov=v; syncBreadcrumb(); };
@@ -7851,7 +8377,7 @@ async function loadMap(id){
   endHistoryPreview(false);
   exitSharedMode();            // if we were viewing a shared map, leave it cleanly
   let m=null;
-  try{ m=await Store.get(id); }catch(e){ toast('Could not load map'); return false; }
+  try{ m=await Store.get(id); }catch(e){ if(window.MINDSPARK_HOST) throw e; toast('Could not load map'); return false; }
   if(!m){ toast('Map not found'); return false; }
   // Legacy migration: old maps may still store `comment` - promote it to `notes`
   for(const n of Object.values(m.nodes||{})){
@@ -8003,6 +8529,7 @@ function exportMenu(){
     <button data-a="buildprompt"><span class="ex-ic">✨</span><span><b>Compile subtree → prompt</b><i>Assemble the selected branch into a prompt</i></span></button>
     <div class="ex-grp">Export</div>
     <button data-a="png"   ><span class="ex-ic">🖼</span><span><b>PNG image</b><i>Themed export, honors map style</i></span></button>
+    <button data-a="print" ><span class="ex-ic">🖨</span><span><b>Print map</b><i>No background - print or save as PDF</i></span></button>
     <button data-a="prompt"><span class="ex-ic">⚡</span><span><b>Export as prompt</b><i>Fill variables, then copy clean text</i></span></button>
     <button data-a="mdrich"><span class="ex-ic">📝</span><span><b>Markdown</b><i>Formatting, tasks, tables, code</i></span></button>
     <button data-a="copy"  ><span class="ex-ic">⎘</span><span><b>Copy as text (clipboard)</b><i>Plain outline, no download</i></span></button>
@@ -8039,6 +8566,7 @@ function exportMenu(){
     else if(a==='present') startPresentation();
     else if(a==='buildprompt') showBuildPrompt(sel || (map&&map.rootId));
     else if(a==='png') exportPNG();
+    else if(a==='print') exportPNG({ print:true });
     else if(a==='prompt') exportAsPrompt();
     else if(a==='mdrich') exportMarkdown(false, true);
     else if(a==='copy') exportMarkdown(true);
@@ -8203,7 +8731,7 @@ function normalizeLoadedMap(m){
            nodes:m.nodes||{}, links:m.links||[], vars:m.vars||{} };
   // Per-map settings are content too: a version restored without them came back
   // with default spacing, style, look and colours.
-  for(const k of ['themeSize','layoutPreset','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter']) if(m[k]!=null) out[k]=m[k];
+  for(const k of ['themeSize','layoutPreset','layoutParams','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter']) if(m[k]!=null) out[k]=m[k];
   return sanitizeMapData(out);
 }
 // ---- Map ingress ------------------------------------------------------------
@@ -10652,12 +11180,28 @@ function pngExportScale(W, H, ios){
 function _isIOSLike(){
   try{ return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1); }catch(e){ return false; }
 }
-async function exportPNG(){
+// The CSS variable reader the PNG export draws with. On screen it is the live
+// theme. For print it is the light theme's palette - dark ink, white cards,
+// light lines - whatever theme is active, so a dark theme does not print light
+// text on white paper or ink-heavy dark cards. Only palette colours are
+// pinned; fonts and sizes (--sans, --look-node-size) still come from the live
+// look. The palette is snapshotted up front: the export awaits images, and the
+// user could switch theme in the meantime.
+function exportCssReader(print){
+  const cs=getComputedStyle(document.documentElement);
+  const fixed=print ? themePalette('light', [...CUSTOM_THEME_INLINE, '--sticky', '--sticky-edge', '--sticky-ink']) : null;
+  return name => (fixed && name in fixed) ? fixed[name] : cs.getPropertyValue(name).trim();
+}
+// opts.print: use light-theme colours (exportCssReader), skip the paper colour
+// and the look's texture/scenery (cards, edges and badges are kept) and hand
+// the image to the browser's print dialog instead of downloading it.
+async function exportPNG(opts){
+  opts=opts||{};
+  const noBg=!!opts.print;
   render();
-  // Read live theme colors from CSS custom properties so the export matches
-  // whatever theme/map style the user has selected.
-  const cs = getComputedStyle(document.documentElement);
-  const css = name => cs.getPropertyValue(name).trim();
+  // Theme colors come from CSS custom properties so the export matches
+  // whatever theme/map style the user has selected (or the light theme, when printing).
+  const css = exportCssReader(noBg);
   const themeBg     = css('--paper')     || '#f4efe6';
   const themeEdge   = css('--line-2')    || '#c8bda8';
   const themeInk    = css('--ink')       || '#23201b';
@@ -10818,7 +11362,7 @@ async function exportPNG(){
   // Uses live CSS vars so theme/look changes are reflected without hardcoding.
   const look = document.documentElement.getAttribute('data-look') || 'office';
   const stageBg = css('--paper') || themeBg;
-  ctx.fillStyle=stageBg; ctx.fillRect(0,0,W,H);
+  if(!noBg){ ctx.fillStyle=stageBg; ctx.fillRect(0,0,W,H); }
   // stage background-image per look - replicate CSS gradients/patterns
   const lineColor = css('--line') || themeLine;
   const paperColor = stageBg;
@@ -11073,7 +11617,7 @@ async function exportPNG(){
       }
     }
   };
-  drawLookBg();
+  if(!noBg) drawLookBg();
   ctx.translate(-minx+pad,-miny+pad);
 
   // Edges - mirror drawEdges() exactly so every layout + style matches live
@@ -11081,9 +11625,12 @@ async function exportPNG(){
   const _sc = (typeof STYLE_CONFIG_DEFAULTS!=='undefined' && STYLE_CONFIG_DEFAULTS[mapStyle])
     ? { ...STYLE_CONFIG_DEFAULTS[mapStyle], ...((map.styleConfig||{})[mapStyle]||{}) }
     : null;
+  const _org = mapStyle==='organic' ? organicBranchInfo(_sc.edgeColor) : null;
   ids.forEach(i=>{
     const n=map.nodes[i]; if(!n.parent||hidden.has(n.parent)) return;
     const p=map.nodes[n.parent]; if(!p) return;
+    // Same rule as drawEdges(): tree table draws no structural connectors.
+    if(mapLayout==='treetable') return;
     // Reproduce drawEdges() branching: timeline/radial/grid/matrix/down vs generic
     let d=null, x1,y1,x2,y2,leftSide=(n.side==='left'),horizontal=true;
     if(mapLayout==='timeline' && n.parent!==map.rootId){
@@ -11129,6 +11676,21 @@ async function exportPNG(){
         x1=leftSide ? p.x : p.x+(p.w||0); y1=p.y+(p.h||0)/2;
         x2=leftSide ? n.x+(n.w||0) : n.x;  y2=n.y+(n.h||0)/2;
       }
+    }
+    if(_org){
+      // Same shapes as drawEdges(): the shared path string goes straight into
+      // Path2D, so there is no second copy of the geometry to drift.
+      const wn=organicBranchWidth(_org.depth[i]||1, _sc.edgeWidth);
+      ctx.setLineDash([]);
+      ctx.fillStyle = ctx.strokeStyle = _org.color[i] || themeEdge;
+      if(d===null){
+        const wp=organicBranchWidth(_org.depth[n.parent]||0, _sc.edgeWidth);
+        const shape=new Path2D(organicEdgePath(p, n, {x1,y1,x2,y2, fromRoot:n.parent===map.rootId, leftSide, horizontal, wp, wn}));
+        ctx.lineWidth=0.6; ctx.fill(shape); ctx.stroke(shape);
+      } else {
+        ctx.lineWidth=wn; ctx.stroke(new Path2D(d));
+      }
+      return;
     }
     // Style: respect styleConfig, fallback to theme defaults like CSS does
     let col = (_sc && _sc.edgeColor) ? _sc.edgeColor : null;
@@ -11226,7 +11788,7 @@ async function exportPNG(){
   }
 
   // Branch labels - text above branch lines for nodes with a `label` property
-  if(mapLayout!=='radial' && mapLayout!=='grid' && mapLayout!=='matrix'){
+  if(mapLayout!=='radial' && mapLayout!=='grid' && mapLayout!=='matrix' && mapLayout!=='treetable'){
     ctx.save();
     ctx.font = '500 11px var(--sans)';
     ctx.fillStyle = css('--ink-soft') || '#636e72';
@@ -11284,7 +11846,10 @@ async function exportPNG(){
     const n=map.nodes[i]; const isRoot=(i===map.rootId);
     const w=n.w||120, h=n.h||40;
     const baseR = _baseRadius;
-    let radius = isRoot ? (mapStyle==='classic'||mapStyle==='classic-outline' ? 6 : mapStyle==='minimal' ? 8 : baseR) : baseR;
+    let radius = isRoot ? (mapStyle==='classic'||mapStyle==='classic-outline' ? 6 : mapStyle==='minimal' ? 8 : baseR) : (_org ? 0 : baseR);
+    // Organic: the underline under this word, matching the CSS border-bottom.
+    const _ow = (_org && !isRoot) ? organicBranchWidth(_org.depth[i]||1, _sc.edgeWidth) : 0;
+    const _oc = _ow ? (_org.color[i] || themeEdge) : null;
     const r = Math.min(radius, h/2);
     // Detect formula early for border/badges/text
     let _isFormula=false, _formulaVal=null;
@@ -11308,6 +11873,8 @@ async function exportPNG(){
     if(mapStyle==='terminal'){
       const _mc=n.color;
       ctx.fillStyle=(_mc && _mc!=='#fff' && _mc!=='#ffffff') ? _mc : 'transparent';
+    } else if(_ow){
+      ctx.fillStyle='transparent';
     } else if(isRoot){
       const _hex = map.color || accent;
       if(mapStyle==='ink'){
@@ -11335,9 +11902,18 @@ async function exportPNG(){
       if(mapStyle==='sketch' && isRoot) return false;
       if((mapStyle==='modern' || mapStyle==='dashed') && isRoot) return false;
       if(mapStyle==='classic-outline' && (zd[i]||0)>=2) return false;
+      if(mapStyle==='organic') return false;
       return true;
     })();
-    if(mapStyle==='terminal'){
+    if(_ow){
+      ctx.save();
+      ctx.strokeStyle=_oc; ctx.lineWidth=_ow; ctx.lineCap='butt';
+      ctx.beginPath();
+      ctx.moveTo(n.x, n.y+h-_ow/2);
+      ctx.lineTo(n.x+w, n.y+h-_ow/2);
+      ctx.stroke();
+      ctx.restore();
+    } else if(mapStyle==='terminal'){
       // Terminal: no card box, just an accent underline (matches CSS border-bottom)
       const _uw = isRoot ? 2.5 : 2;
       ctx.save();
@@ -11390,8 +11966,9 @@ async function exportPNG(){
         ctx.restore();
       }
     }
-    // Reference node - distinct left border + italic, like live .node.ref-node
-    if(n.ref){
+    // Reference node - distinct left border + italic, like live .node.ref-node.
+    // Organic's border:none removes that border live, so none here either.
+    if(n.ref && !_ow){
       ctx.save();
       // clip to node shape then draw 4px left border in accent
       roundRect(ctx, n.x, n.y, w, h, r);
@@ -11414,13 +11991,18 @@ async function exportPNG(){
         bg='transparent';
         textFill=n.textColor || themeInk;
       }
+    } else if(_ow){
+      // Main-branch words take their branch's colour, as on screen.
+      bg='transparent';
+      textFill=n.textColor || (_org.depth[i]===1 ? mixHex(_oc, themeInk, 0.4) : themeInk);
     } else {
       bg = isRoot ? (map.color || accent) : (_hasColor2 ? n.color : _zebraBg);
       textFill = n.textColor || (isRoot ? pickContrast(bg) : (_hasColor2 ? pickContrast(n.color) : themeInk));
     }
     const sans = css('--sans') || '"Bricolage Grotesque",system-ui,sans-serif';
     const serif = css('--serif') || sans;
-    let fontPx = n.fontSize || (isRoot ? 19 : 15);
+    const _orgMain = !!_ow && _org.depth[i]===1;
+    let fontPx = n.fontSize || (isRoot ? 19 : _orgMain ? 16 : 15);
     // look font-size scaling (handwritten 1.2em) + lookConfig nodeSize
     const lookScale = (look==='handwritten' ? 1.2 : 1) * (parseFloat(css('--look-node-size')) || 1);
     if(!n.fontSize) fontPx = Math.round(fontPx * lookScale);
@@ -11445,6 +12027,12 @@ async function exportPNG(){
       let base;
       if(mapStyle==='terminal') base = isRoot ? 20 : 16;   // leave room for the > / ▸ cursor prefix
       else if(mapStyle==='paper') return Math.max(18, Math.max(18, _cp || 15) * _padScale);   // clears the punch-hole strip and margin rule
+      // Card styles get 1.5px of side border inside w, which is the slack that
+      // keeps a max-content line from wrapping on canvas measuring a hair
+      // wider than layout. Organic words have no side borders and filled the
+      // box exactly, so every main branch wrapped in the PNG. Same slack here,
+      // scaled like the live padding it mirrors.
+      else if(_ow) return Math.max(0, ((_cp > 0 ? _cp : 15) - 1.5) * _padScale);
       else if(_cp > 0) base = isRoot ? _cp + 12 : _cp;
       else if(mapStyle==='bubble') base = isRoot ? 26 : 22;
       else base = isRoot ? 22 : 15;
@@ -11483,7 +12071,7 @@ async function exportPNG(){
       ctx.fillText('YAML', n.x+8+_fw/2, n.y-9+6);
       ctx.restore();
     }
-    const textCenterY = n.y + imgDrawH + (h-imgDrawH)/2;
+    const textCenterY = n.y + imgDrawH + (h-imgDrawH-_ow)/2;
     // Highlight (background per text) - node-wide for the canvas export
     if(n.highlight){
       ctx.fillStyle = n.highlight;
@@ -11542,9 +12130,9 @@ async function exportPNG(){
       }
       ctx.fillStyle=_col;
       // Use same font handling as live formula (tabular nums, but canvas can't easily set that)
-      const _f = (_isTaskDone||!!n.strike ? 'line-through ' : '') + (n.underline?'underline ':'') + ((!!n.bold||isRoot)?'bold ':'500 ') + (n.italic||!!n.ref?'italic ':'') + fontPx+'px '+fontFamily;
+      const _f = (_isTaskDone||!!n.strike ? 'line-through ' : '') + (n.underline?'underline ':'') + ((!!n.bold||isRoot||_orgMain)?'bold ':'500 ') + (n.italic||!!n.ref?'italic ':'') + fontPx+'px '+fontFamily;
       // Simple center/align draw for formula result (single line)
-      ctx.font=((!!n.bold||isRoot)?'bold ':'500 ') + (n.italic||!!n.ref?'italic ':'') + fontPx+'px '+fontFamily;
+      ctx.font=((!!n.bold||isRoot||_orgMain)?'bold ':'500 ') + (n.italic||!!n.ref?'italic ':'') + fontPx+'px '+fontFamily;
       ctx.textAlign = mapStyle==='terminal' ? 'left' : (n.align==='left' ? 'left' : n.align==='right' ? 'right' : 'center');
       const _fx = (mapStyle==='terminal' || n.align==='left') ? textX : n.align==='right' ? textX+textMaxWidth : textX+textMaxWidth/2;
       // Draw with strike-through if needed
@@ -11570,7 +12158,7 @@ async function exportPNG(){
         drawNodeMath(ctx, htmlForExport, {
           x: textX, y: textCenterY, maxWidth: textMaxWidth,
           fontPx, color: textFill, family: fontFamily,
-          bold: !!n.bold || isRoot, align: n.align || (mapStyle==='terminal' ? 'left' : 'center'), listType: n.listType || null
+          bold: !!n.bold || isRoot || _orgMain, align: n.align || (mapStyle==='terminal' ? 'left' : 'center'), listType: n.listType || null
         });
       } else {
         drawFormattedText(ctx, htmlForExport, {
@@ -11581,12 +12169,13 @@ async function exportPNG(){
       fontPx,
       color: textFill,
       family: fontFamily,
-      baseBold: !!n.bold || isRoot,
+      baseBold: !!n.bold || isRoot || _orgMain,
       baseItalic: !!n.italic || !!n.ref,
       baseUnderline: !!n.underline,
       baseStrike: !!n.strike || _isTaskDone,
       align: n.align || (mapStyle==='terminal' ? 'left' : 'center'),
-      listType: n.listType || null
+      listType: n.listType || null,
+      linkColor: css('--link')
     });
       }
       if(_isTaskDone) ctx.globalAlpha = _prevAlpha;
@@ -11640,6 +12229,7 @@ async function exportPNG(){
     cv.toBlob(b=>{
       // A canvas past the browser's limits encodes to nothing rather than throwing.
       if(!b){ toast('This map is too large to export as a PNG on this device'); return; }
+      if(opts.print){ printMapImage(b, W>H); return; }
       download(b,(map.title||'mindmap')+'.png'); toast('PNG exported');
     });
   }catch(e){
@@ -11647,6 +12237,57 @@ async function exportPNG(){
     console.warn('PNG export failed:', e.message);
     toast('Could not export the PNG');
   }
+}
+
+// "Print map": the live canvas cannot be printed directly (it is a pan/zoom
+// viewport clipped to the window, with the look's texture painted around it),
+// so print the background-free PNG render instead. Wide maps ask for a
+// landscape page.
+function printMapImage(blob, landscape){
+  const url=URL.createObjectURL(blob);
+  printOnly('mapPrintRoot', 'map-printing', root=>new Promise((resolve, reject)=>{
+    let pageStyle=document.getElementById('mapPrintPage');
+    if(!pageStyle){ pageStyle=document.createElement('style'); pageStyle.id='mapPrintPage'; document.head.appendChild(pageStyle); }
+    pageStyle.textContent='@page{size:'+(landscape?'landscape':'portrait')+';margin:1cm}';
+    const undo=()=>{ pageStyle.textContent=''; URL.revokeObjectURL(url); };
+    const img=new Image();
+    img.alt=map.title||'Mind map';
+    img.onload=()=>resolve(undo);
+    img.onerror=()=>{ undo(); reject(new Error('the map image did not load')); };
+    root.appendChild(img);
+    img.src=url;
+  })).catch(()=>toast('Could not prepare the map for printing'));
+}
+
+// Print one container on its own through the browser's dialog, which also
+// offers "Save as PDF" - no PDF library needed. While printing, `cls` is set on
+// <html>; the print CSS keys off it to hide the rest of the app. fill(root)
+// puts the content in. It may return a promise (an image still loading, say),
+// which may resolve to an undo function that runs once printing is over. If
+// fill fails, nothing is printed and the rejection is passed on.
+async function printOnly(id, cls, fill){
+  let root=document.getElementById(id);
+  if(!root){ root=document.createElement('div'); root.id=id; document.body.appendChild(root); }
+  root.textContent='';
+  const oldTitle=document.title;
+  let undo=null, cleaned=false;
+  const cleanup=()=>{
+    if(cleaned) return; cleaned=true;
+    window.removeEventListener('afterprint', cleanup);
+    document.documentElement.classList.remove(cls);
+    document.title=oldTitle;
+    root.textContent='';
+    if(typeof undo==='function') undo();
+  };
+  try{ undo=await fill(root); }
+  catch(e){ cleanup(); throw e; }
+  // Browsers use the page title as the suggested "Save as PDF" filename.
+  document.title=((map && map.title) || 'mindmap').replace(/[\\/:*?"<>|]/g,'').trim() || 'mindmap';
+  document.documentElement.classList.add(cls);
+  window.addEventListener('afterprint', cleanup);
+  // The short delay lets the print layout settle; the 1s fallback covers
+  // browsers that never fire afterprint.
+  setTimeout(()=>{ window.print(); setTimeout(cleanup, 1000); }, 30);
 }
 
 // Render text (possibly containing inline <b>/<i>/<u>/<s>/<a>/<br>/<ul>/<ol>/<li>)
@@ -11798,10 +12439,11 @@ function drawFormattedText(ctx, html, opts){
   const lineH = Math.round(fontPx * 1.35);
   const totalH = lines.length * lineH;
   let yy = y - totalH/2 + lineH/2;
-  // Hyperlink colour (resolved from CSS var so it matches the live theme)
-  const linkColor = (typeof getComputedStyle === 'function')
+  // Hyperlink colour: the caller's palette (exportPNG passes it, so a print
+  // uses the light theme's), else the live theme's CSS var.
+  const linkColor = opts.linkColor || ((typeof getComputedStyle === 'function')
     ? (getComputedStyle(document.documentElement).getPropertyValue('--link').trim() || '#3a6ea5')
-    : '#3a6ea5';
+    : '#3a6ea5');
   ctx.fillStyle = color;
   lines.forEach(line => {
     const lineW = line.reduce((s, r) => s + r.w, 0);
@@ -12684,7 +13326,8 @@ const MAP_STYLES = [
   {id:'clay', name:'Clay', desc:'Inflated clay, soft inset shadows'},
   {id:'ink', name:'Ink', desc:'Bold comic, heavy ink borders, hard shadow'},
   {id:'paper', name:'Paper', desc:'Legal pad, margin rule and punch holes'},
-  {id:'terminal', name:'Terminal', desc:'Prompt-style cards, accent underlines'}
+  {id:'terminal', name:'Terminal', desc:'Prompt-style cards, accent underlines'},
+  {id:'organic', name:'Organic', desc:'Tony Buzan style: words on tapering, colour-coded branches'}
 ];
 // Per-style tunables, keyed by style id on the map as map.styleConfig - the
 // same pattern as layoutConfig. Defaults mirror what the CSS and the export
@@ -12705,6 +13348,9 @@ const STYLE_CONFIG_DEFAULTS = {
   ink:     { edgeWidth:2.6, edgeColor:'', radius:8,   cardPad:0,  glow:0,  dash:0 },
   paper:   { edgeWidth:1.5, edgeColor:'', radius:6,   cardPad:4,  glow:0,  dash:0 },
   terminal:{ edgeWidth:1.6, edgeColor:'', radius:0,   cardPad:0,  glow:0,  dash:0 },
+  // edgeWidth is the main branch; deeper ones thin out from it
+  // (organicBranchWidth). edgeColor '' keeps one colour per main branch.
+  organic: { edgeWidth:6,   edgeColor:'', radius:28,  cardPad:0,  glow:0,  dash:0 },
 };
 const STYLE_CONFIG_BOUNDS = {
   edgeWidth:[1,8], edgeColor:[0,40], radius:[0,999], cardPad:[0,80], glow:[0,80], dash:[0,60], tilt:[0,5],
@@ -13105,6 +13751,7 @@ const LAYOUT_PARAMS = {
   },
   radial: { ring:[60,600], startAngle:[-360,360], sweep:[30,360], pad:[0,30], padV:[0,40] },
   matrix: { colGap:[8,300], rowGap:[8,300], cellGap:[0,120], headGap:[8,300] },
+  treetable: { colGap:[0,300], rowGap:[0,120], rootSide:['left','right','top','bottom'], stretchLeaves:'boolean' },
   grid:   { columns:[1,8], gapX:[8,300], gapY:[8,300], rowGap:[0,120], indent:[0,120] },
 };
 // The built-in layouts, now expressed as strategy + parameters. These are the
@@ -13121,6 +13768,7 @@ const ENGINE_PARAMS = {
   stair:   { strategy:'chain', params:{ axis:'y', dir:1, gap:45, stem:24, indent:42, alternate:true,  start:'above', sideName:'down', gapMain:70, gapCross:40 } },
   grid:    { strategy:'grid',  params:{ columns:3, gapX:60, gapY:60, rowGap:14, indent:24 } },
   matrix:  { strategy:'matrix',params:{ colGap:40, rowGap:24, cellGap:10, headGap:60 } },
+  treetable:{ strategy:'treetable', params:{ colGap:16, rowGap:6, rootSide:'left', stretchLeaves:false } },
   fishbone:{ strategy:'chain', params:{ axis:'x', dir:1, gap:70, stem:30, indent:26,
                                         alternate:true, start:'above', angle:35,
                                         gapMain:70, gapCross:22 } },
@@ -13159,7 +13807,40 @@ function resolveLayout(name, params){
   return { strategy, params: { ...base, ...validateLayoutParams(strategy, params) } };
 }
 
-const LAYOUT_ENGINES = ['balanced','right','left','down','up','timeline','stair','radial','grid','matrix','fishbone'];
+// The parameters one map actually renders with: the layout name resolves to a
+// strategy and defaults, then the per-map config section applies on top.
+//
+// A preset's params belong to the preset, so the built-in config DEFAULTS must
+// not overwrite them. Without that distinction every imported layout that
+// names a strategy with config knobs (treetable's colGap/rowGap, radial's ring)
+// silently snapped back to the built-in values and looked broken. A config
+// section actually stored on the map is an explicit user choice and still wins.
+function layoutRunForMap(layout, layoutParams, layoutConfig){
+  const run = resolveLayout(layout, layoutParams);
+  const params = { ...run.params };
+  const hasParams = !!layoutParams && typeof layoutParams === 'object'
+    && !Array.isArray(layoutParams) && Object.keys(layoutParams).length > 0;
+  const savedCfg = !!layoutConfig && typeof layoutConfig === 'object'
+    && !Array.isArray(layoutConfig)
+    && Object.prototype.hasOwnProperty.call(layoutConfig, layout)
+    && !!layoutConfig[layout] && typeof layoutConfig[layout] === 'object'
+    && !Array.isArray(layoutConfig[layout]);
+  const cfg = (savedCfg || !hasParams) ? validateLayoutConfig(layoutConfig)[layout] : null;
+  if(cfg){
+    if(cfg.hGap != null && run.strategy === 'tree'){
+      if(params.axis === 'y'){ params.gapCross = cfg.hGap; params.gapMain = cfg.vGap; }
+      else { params.gapMain = cfg.hGap; params.gapCross = cfg.vGap; }
+    }
+    for(const k of ['gap','stem','indent','alternate','start','ring','startAngle','sweep',
+                    'columns','gapX','gapY','rowGap','angle','colGap','cellGap','headGap','rootSide',
+                    'stretchLeaves']){
+      if(cfg[k] !== undefined) params[k] = cfg[k];
+    }
+  }
+  return { strategy: run.strategy, params };
+}
+
+const LAYOUT_ENGINES = ['balanced','right','left','down','up','timeline','stair','radial','grid','matrix','treetable','fishbone'];
 const BUILTIN_LAYOUTS = [
   {v:1, id:'balanced', name:'Balanced', desc:'Branches split left & right', engine:'balanced'},
   {v:1, id:'right',    name:'Right',    desc:'All branches grow right',     engine:'right'},
@@ -13173,6 +13854,7 @@ const BUILTIN_LAYOUTS = [
   {v:1, id:'grid',     name:'Grid',     desc:'Top-level topics as cards, sub-topics as outlines',
         engine:'grid'},
   {v:1, id:'matrix',   name:'Matrix',   desc:'Columns and aligned rows, read like a table', engine:'matrix'},
+  {v:1, id:'treetable', name:'Tree table', desc:'Depth as columns, each block spans its subtree', engine:'treetable'},
   {v:1, id:'fishbone', name:'Fishbone', desc:'Spine with angled ribs, for cause-and-effect', engine:'fishbone'},
 ];
 const CUSTOM_LAYOUTS_KEY = 'mindspark:layouts';
@@ -13421,6 +14103,34 @@ function showThemeImportForm(){
     importLibraryTheme(b.dataset.lib);
   });
 }
+// The values `keys` take under built-in theme `id`, whatever theme is active.
+// The palette must be read from the theme's own CSS block, but two things sit
+// on :root as INLINE styles and would win over the attribute selector: the six
+// config knobs applyThemeConfigVars() writes, and (when a custom theme is
+// active) its 20 inline variables. Clear them for the read, then restore
+// exactly what was there before. It all happens in one task, so nothing paints.
+function themePalette(id, keys){
+  const root=document.documentElement;
+  const saved={};
+  for(const key of CUSTOM_THEME_INLINE) saved[key]=root.style.getPropertyValue(key);
+  const prev=root.getAttribute('data-theme');
+  const vars={};
+  try{
+    if(id && id!=='light') root.setAttribute('data-theme', id);
+    else root.removeAttribute('data-theme');
+    for(const key of CUSTOM_THEME_INLINE) root.style.removeProperty(key);
+    const cs=getComputedStyle(root);
+    for(const key of keys) vars[key]=cs.getPropertyValue(key).trim();
+  }finally{
+    for(const key of CUSTOM_THEME_INLINE){
+      if(saved[key]) root.style.setProperty(key, saved[key]);
+      else root.style.removeProperty(key);
+    }
+    if(prev && prev!=='light') root.setAttribute('data-theme', prev);
+    else root.removeAttribute('data-theme');
+  }
+  return vars;
+}
 // Import one of the shipped library themes (the ones beyond the panel's
 // visible 20) straight from the Add-a-theme dialog. The theme's palette is
 // read from its own live CSS block, so the imported result is exactly what
@@ -13429,26 +14139,7 @@ function importLibraryTheme(id){
   closeColorPicker();
   const t=THEMES.find(x=>x.id===id);
   if(!t) return;
-  const root=document.documentElement;
-  // The palette must be read from the theme's own CSS block, but two things
-  // sit on :root as INLINE styles and would win over the attribute selector:
-  // the six config knobs applyThemeConfigVars() writes, and (when a custom
-  // theme is active) the previous custom theme's 20 inline variables. Clear
-  // them for the read, then restore exactly what was there before.
-  const saved={};
-  for(const key of CUSTOM_THEME_INLINE) saved[key]=root.style.getPropertyValue(key);
-  const prev=root.getAttribute('data-theme');
-  root.setAttribute('data-theme', id);
-  const cs=getComputedStyle(root);
-  const vars={};
-  for(const key of CUSTOM_THEME_INLINE) root.style.removeProperty(key);
-  for(const key of CUSTOM_THEME_VARS) vars[key]=cs.getPropertyValue(key).trim();
-  for(const key of CUSTOM_THEME_INLINE){
-    if(saved[key]) root.style.setProperty(key, saved[key]);
-    else root.style.removeProperty(key);
-  }
-  if(prev && prev!=='light') root.setAttribute('data-theme', prev);
-  else root.removeAttribute('data-theme');
+  const vars=themePalette(id, CUSTOM_THEME_VARS);
   const theme=validateCustomTheme({ v:1, id, name:t.name.replace(/<br\s*\/?>/gi,' ').trim(), vars });
   if(!theme){ toast('Could not import that theme'); return; }
   if(!saveCustomTheme(theme)){ toast('Could not save - this browser\u2019s storage may be full.'); return; }
@@ -13897,8 +14588,16 @@ const UI_LAYOUTS = [
 // outline-open). Rows select + centre the node; the twist folds a branch in
 // the outline only - the map itself is never touched. Rebuilt by render()
 // alongside the breadcrumb, with a html-compare so steady state costs nothing.
+//
+// The html compare alone was not enough on a big map: any text edit changes
+// the html, and replacing all 1500 rows to update one label measured tens of
+// ms per render. The tree SHAPE is tracked separately, so a same-shape change
+// patches just the labels (and the selection) in place.
 const _olCollapsed=new Set();
 let _olPrev='';
+let _olShape='';
+let _olLabels=new Map();
+let _olSel=null;
 function ensureOutlinePane(){
   let pane=document.getElementById('outlinePane');
   if(pane) return pane;
@@ -13930,8 +14629,13 @@ function ensureOutlinePane(){
 function renderOutline(){
   const pane=document.getElementById('outlinePane');
   if(!pane || !document.body.classList.contains('ui-outline')) return;
+  // A folded dock is invisible. Rebuilding 1500 rows for it on every edit is
+  // wasted work; the toggle below renders it when it opens.
+  if(!document.body.classList.contains('outline-open')) return;
   const bodyEl=pane.querySelector('.ol-body'); if(!bodyEl) return;
   let html='';
+  const shapeBuf=[];
+  const labels=new Map();
   if(map){
     const hidden=hiddenSet();
     const buf=[];
@@ -13941,9 +14645,14 @@ function renderOutline(){
         if(hidden.has(id)) continue;
         const n=map.nodes[id];
         const kids=childrenOf(id).filter(k=>!hidden.has(k));
+        const label=nodeTextPlain(n.text||'')||'(untitled)';
+        labels.set(id, label);
+        // Shape is ids and child counts only. Labels and the outline's own
+        // twist folds are patched in place, so neither counts as a rebuild.
+        shapeBuf.push(id, kids.length);
         buf.push(`<li class="ol-node${id===sel?' sel':''}${_olCollapsed.has(id)?' collapsed':''}" data-id="${id}">`);
         buf.push(`<div class="ol-row"><span class="ol-twist${kids.length?'':' ol-leaf'}">▾</span>`);
-        buf.push(`<span class="ol-label">${escapeHtml(nodeTextPlain(n.text||'')||'(untitled)')}</span></div>`);
+        buf.push(`<span class="ol-label">${escapeHtml(label)}</span></div>`);
         if(kids.length) walk(kids, true);
         buf.push('</li>');
       }
@@ -13952,16 +14661,49 @@ function renderOutline(){
     walk([map.rootId], false);
     html=buf.join('');
   }
-  if(html!==_olPrev){
-    _olPrev=html;
+  // JSON, not a hand-rolled join: ids can contain any character an imported
+  // map brings, and a separator collision would hide a real tree change.
+  const shape=JSON.stringify(shapeBuf);
+  const empty=!bodyEl.firstElementChild;
+  // An empty pane with a stale cache must still render; the equality check
+  // alone is what left the outline blank after switching layouts away and back.
+  if(html===_olPrev && !empty) return;
+  if(shape!==_olShape || empty){
+    // Different tree, or an empty pane whose cache is stale: replace it all.
+    _olPrev=html; _olShape=shape; _olLabels=labels; _olSel=sel;
     const st=bodyEl.scrollTop;
     bodyEl.innerHTML=html;
     bodyEl.scrollTop=st;
+    return;
   }
+  // Same tree: patch the labels that changed, then the selection and any twist
+  // fold that is out of step. Everything else in the pane stays untouched.
+  const liById=new Map();
+  bodyEl.querySelectorAll('.ol-node').forEach(li=>liById.set(li.dataset.id, li));
+  for(const [id, label] of labels){
+    if(_olLabels.get(id)===label) continue;
+    const li=liById.get(id); if(!li) continue;
+    const span=li.querySelector('.ol-label');
+    if(span) span.textContent=label;
+  }
+  for(const id of labels.keys()){
+    const li=liById.get(id);
+    if(!li) continue;
+    const want=_olCollapsed.has(id);
+    if(li.classList.contains('collapsed')!==want) li.classList.toggle('collapsed', want);
+  }
+  if(sel!==_olSel){
+    bodyEl.querySelectorAll('.ol-node.sel').forEach(li=>li.classList.remove('sel'));
+    const cur=liById.get(sel); if(cur) cur.classList.add('sel');
+  }
+  _olPrev=html; _olLabels=labels; _olSel=sel;
 }
 $('#outlineBtn')?.addEventListener('click',()=>{
   if(!document.body.classList.contains('ui-outline')) return;
   document.body.classList.toggle('outline-open');
+  // It was skipped while folded, so render it now - inside a child index, or
+  // childrenOf() degrades to a full scan per node on a big map.
+  if(document.body.classList.contains('outline-open')) withChildIndex(renderOutline);
   refitStageAfterChrome();   // the dock takes 280px off the canvas - re-fit once it has slid
 });
 
@@ -14089,7 +14831,12 @@ function applyUiLayout(id){
   document.body.classList.toggle('ui-mirror', mirror);
   document.body.classList.toggle('ui-outline', outline);
   document.body.classList.remove('outline-open');   // the outline dock starts folded
-  if(!outline){ document.getElementById('outlinePane')?.remove(); _olPrev=''; }   // a fresh pane must render, never hit the html-compare cache
+  if(!outline){
+    document.getElementById('outlinePane')?.remove();
+    _olPrev='';
+    // A fresh pane must render, never hit the shape/label caches.
+    _olShape=''; _olLabels=new Map(); _olSel=null;
+  }
   document.body.classList.remove('zen-chrome');   // zen chrome is revealed on hover, never persisted
   // Pin toolbar button is zen-only: remove it immediately when leaving zen
   // (classic/rail branches bypass restoreShell, so they would otherwise leak
@@ -14241,8 +14988,8 @@ function applyUiLayout(id){
     restoreShell();
     rewireSide();
     ensureOutlinePane();
-    renderOutline();
-    document.body.classList.add('outline-open');
+    document.body.classList.add('outline-open');   // before rendering: a folded dock skips the pass
+    withChildIndex(renderOutline);
   }else if(minimal){
     // Minimal: the plain modern shell with the sidebar removed entirely - no
     // column, no slide-over. The compact ＋ stays in the brand row; the
@@ -14773,6 +15520,22 @@ function buildStyleThumb(id){
       <path d="M26,28 C38,28 47,11 56,11 M26,28 C38,28 47,47 56,47" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
   </span>`;
+  if(id==='organic'){
+    // Drawn with the live helper, so the picker shows the real taper.
+    const [c1,c2]=[ORGANIC_BRANCH_COLORS[0], ORGANIC_BRANCH_COLORS[3]];
+    const b1=taperedBezierPath([22,28, 40,28, 44,15, 54,15], 4.4, 1.8);
+    const b2=taperedBezierPath([22,28, 40,28, 44,51, 54,51], 4.4, 1.8);
+    return `<span class="style-thumb">
+    <svg viewBox="0 0 70 60" width="70" height="40">
+      <path d="${b1}" fill="${c1}"/><path d="${b2}" fill="${c2}"/>
+      <rect x="${ROOT.x}" y="${ROOT.y}" width="${ROOT.w}" height="${ROOT.h}" rx="6" fill="var(--accent)"/>
+      <line x1="54" y1="15" x2="69" y2="15" stroke="${c1}" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="54" y1="51" x2="69" y2="51" stroke="${c2}" stroke-width="1.8" stroke-linecap="round"/>
+      <rect x="56" y="10" width="11" height="2.4" rx="1" fill="var(--ink)" opacity="0.55"/>
+      <rect x="56" y="46" width="11" height="2.4" rx="1" fill="var(--ink)" opacity="0.55"/>
+    </svg>
+  </span>`;
+  }
   if(id==='terminal') return `<span class="style-thumb">
     <svg viewBox="0 0 70 60" width="70" height="40">
       <text x="${ROOT.x}" y="${ROOT.y+9}" font-family="monospace" font-size="8" font-weight="700" fill="var(--accent)">&#9646;</text>
@@ -14834,6 +15597,16 @@ function buildLayoutThumb(id){
     <rect x="38" y="20" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
     <rect x="6"  y="40" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
     <rect x="38" y="40" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+  </svg></span>`;
+  if(id==='treetable') return `<span class="style-thumb"><svg viewBox="0 0 70 60" width="70" height="40">
+    <rect x="2"  y="12" width="14" height="30" rx="2" fill="var(--accent)"/>
+    <rect x="22" y="4"  width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <rect x="22" y="18" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <rect x="22" y="32" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <rect x="42" y="4"  width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <rect x="42" y="18" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <rect x="42" y="32" width="14" height="10" rx="2" fill="var(--card-bg,#fff)" stroke="var(--line)"/>
+    <path d="M16,27 L19,27 M19,9 L19,45 M19,9 L22,9 M19,23 L22,23 M19,37 L22,37 M36,9 L39,9 M39,9 L39,37 M39,9 L42,9 M39,23 L42,23 M39,37 L42,37" fill="none" stroke="var(--ink-soft)" stroke-width="1.1"/>
   </svg></span>`;
   if(id==='timeline') return `<span class="style-thumb"><svg viewBox="0 0 70 60" width="70" height="40">
     <path d="M11,30 L62,30" fill="none" stroke="var(--ink-soft)" stroke-width="1.2"/>
@@ -15307,6 +16080,10 @@ function toggleFocusMode(){
   } else {
     exit?.remove();
   }
+  // Focus mode hides the chrome the breadcrumb floats over, and this toggle
+  // does not re-render the map - sync it here so the shown state does not
+  // linger until the next render.
+  syncBreadcrumb();
   // The viewport size changes when chrome is shown/hidden - wait for the layout
   // to settle, then smoothly animate the map back to centred (keeping zoom) so it
   // doesn't just jump sideways.
@@ -16047,9 +16824,9 @@ async function _proceedBoot(){
   loadUserTemplates();   // merge any saved "My templates" into the catalog
   // A shared map queued for copying takes priority over loading the last map.
   if(await consumePendingImport()) return;
-  try{ const _mid=new URLSearchParams(location.search).get('map'); if(_mid && await loadMap(_mid)) return; }catch(e){}
+  try{ const _mid=new URLSearchParams(location.search).get('map'); if(_mid && await loadMap(_mid)) return; }catch(e){ if(window.MINDSPARK_HOST) throw e; }
   let idx=[];
-  try{ idx=await Store.list(); }catch(e){ console.warn('could not list maps; starting with an empty list:', e.message); }
+  try{ idx=await Store.list(); }catch(e){ if(window.MINDSPARK_HOST) throw e; console.warn('could not list maps; starting with an empty list:', e.message); }
   if(idx && idx.length){
     const ok=await loadMap(idx[0].id);
     if(!ok) createMap();
@@ -16091,13 +16868,22 @@ function showUserPill(){
     const pill=$('#userPill'); if(!pill) return;
     pill.classList.remove('shared-pill'); pill.title='';
     pill.style.display='flex';
-    const name=(CURRENT_USER && CURRENT_USER.username)||'';
+    // A hosted deployment authenticates outside the app, so there is no
+    // ServerStore account to read. window.MINDSPARK_HOST.user can supply one;
+    // without it the chip still reads sensibly instead of showing an empty name.
+    const hosted=!!window.MINDSPARK_HOST;
+    const name=(CURRENT_USER && (CURRENT_USER.username||CURRENT_USER.login))||(hosted?'Hosted':'');
     const av=$('#userAvatar'), ini=$('#userInitial');
     if(av) av.hidden=true;   // no avatar in self-hosted mode
     if(ini){ ini.hidden=false; ini.textContent=(name.trim().charAt(0)||'?').toUpperCase(); }
     $('#userName').textContent=name;
     $('#userSignOut').onclick=async()=>{
-      if(confirm('Sign out of MindSpark?')){ await ServerStore.logout(); location.reload(); }
+      if(!confirm('Sign out of MindSpark?')) return;
+      try{
+        if(hosted && typeof window.MINDSPARK_HOST.logout==='function') await window.MINDSPARK_HOST.logout();
+        else if(!hosted) await ServerStore.logout();
+      }catch(e){}   // the host owns the session; a reload is still the way out
+      location.reload();
     };
     return;
   }
@@ -16760,6 +17546,7 @@ function _shareePayload(m){
               rootId:m.rootId, nodes:m.nodes, links:m.links||[], vars:m.vars||{} };
   if(m.themeSize) p.themeSize = m.themeSize;
   if(m.layoutConfig) p.layoutConfig = m.layoutConfig;   // omitted entirely when unset
+  if(m.layoutParams) p.layoutParams = m.layoutParams;   // structural spacing, e.g. a tree-table preset
   if(m.styleConfig) p.styleConfig = m.styleConfig;
   if(m.lookConfig) p.lookConfig = m.lookConfig;
   if(m.themeConfig) p.themeConfig = m.themeConfig;   // the Theme dialog promises "included in share links"
@@ -16769,7 +17556,8 @@ async function buildShareLink(){
   const json=JSON.stringify(_shareePayload(map));
   const gz=await _gzip(json);
   const token = gz ? ('g'+_b64urlFromBytes(gz)) : ('r'+_b64urlFromBytes(new TextEncoder().encode(json)));
-  return location.origin + location.pathname + '#view=' + token;
+  const base = window.MINDSPARK_HOST?.shareBase || location.origin + location.pathname;
+  return base + '#view=' + token;
 }
 async function decodeShareToken(token){
   const scheme=token[0], body=token.slice(1);
@@ -16818,7 +17606,7 @@ async function tryEnterSharedView(){
   map=sanitizeMapData({ id:'shared', title:payload.title||'Shared map', color:payload.color||'#e0613a',
         style:payload.style, layout:payload.layout, rootId:payload.rootId,
         nodes:payload.nodes||{}, links:payload.links||[], vars:payload.vars||{},
-        themeSize:payload.themeSize, layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
+        themeSize:payload.themeSize, layoutParams:payload.layoutParams, layoutConfig:payload.layoutConfig, styleConfig:payload.styleConfig, lookConfig:payload.lookConfig, themeConfig:payload.themeConfig });
   sel=null;
   $('#mapTitle').value=map.title; $('#mapTitle').readOnly=true;
   // Grow the title <input> to fit the whole title (it clips to its width) so a
@@ -16935,10 +17723,22 @@ async function publishCurrentMap(){
   try{ await Store.save(map); }
   catch(e){ toast('Could not save the map before publishing'); return; }
   try{
-    const res=await ServerStore.publish(map.id);
-    // Resolve against the origin the user is actually on. The server only
-    // returns a path because a reverse proxy may expose it as an upstream IP.
-    showPublishPopup(new URL('public/'+res.guid, location.origin+'/').href);
+    const host=window.MINDSPARK_HOST;
+    let url=null;
+    if(host && typeof host.publish==='function'){
+      // A host owns its publish API; accept whatever link shape it returns.
+      const res=await host.publish(map.id);
+      if(typeof res==='string') url=res;
+      else if(res && res.url) url=res.url;
+      else if(res && res.guid) url=new URL('public/'+res.guid, location.origin+'/').href;
+    } else {
+      const res=await ServerStore.publish(map.id);
+      // Resolve against the origin the user is actually on. The server only
+      // returns a path because a reverse proxy may expose it as an upstream IP.
+      url=new URL('public/'+res.guid, location.origin+'/').href;
+    }
+    if(!url) throw new Error('no publish link');
+    showPublishPopup(url);
   }catch(e){
     toast(e && e.message==='401' ? 'Please sign in again' : 'Could not publish this map');
   }
@@ -16973,7 +17773,9 @@ function showPublishPopup(url){
   m.querySelector('.vf-backdrop').onclick=close;
   m.querySelector('.vf-unpublish').onclick=async()=>{
     try{
-      await ServerStore.unpublish(map.id);
+      const host=window.MINDSPARK_HOST;
+      if(host && typeof host.unpublish==='function') await host.unpublish(map.id);
+      else await ServerStore.unpublish(map.id);
       close();
       toast('Publication removed - the link no longer works');
     }catch(e){ toast('Could not unpublish'); }
@@ -17491,6 +18293,9 @@ function cloudDiff(base, cur){
   for(const id in cn){ if(JSON.stringify(bn[id])!==JSON.stringify(cn[id])) ops.push({t:'node', id, n:cn[id]}); }
   for(const id in bn){ if(!cn[id]) ops.push({t:'del', id}); }
   ['title','color','rootId','layout','style','themeSize'].forEach(k=>{ if((base||{})[k]!==(cur||{})[k]) ops.push({t:'meta',k,v:cur[k]}); });
+  ['layoutParams','layoutConfig','styleConfig','lookConfig','themeConfig'].forEach(k=>{
+    if(JSON.stringify((base||{})[k])!==JSON.stringify((cur||{})[k])) ops.push({t:'meta',k,v:cur[k]});
+  });
   if(JSON.stringify((base&&base.links)||[])!==JSON.stringify((cur&&cur.links)||[])) ops.push({t:'meta',k:'links',v:cur.links});
   if(JSON.stringify((base&&base.vars)||{})!==JSON.stringify((cur&&cur.vars)||{})) ops.push({t:'meta',k:'vars',v:cur.vars});
   return ops;
@@ -17506,6 +18311,9 @@ function adoptCloudMerged(merged){
   if(merged.color) map.color=merged.color;
   if(merged.rootId) map.rootId=merged.rootId;
   if(merged.layout) map.layout=merged.layout;
+  for(const k of ['layoutParams','layoutConfig','styleConfig','lookConfig','themeConfig']){
+    if(merged[k]!=null) map[k]=merged[k]; else delete map[k];
+  }
   sanitizeMapData(map);                  // the room's copy is as untrusted as a share link
   if('style' in merged) map.style=merged.style;
   if('themeSize' in merged && ['s','m','l','xl'].includes(merged.themeSize)) map.themeSize=merged.themeSize;
@@ -17642,7 +18450,7 @@ function _applySharedMap(id, token, data){
   map=sanitizeMapData({ id:'shared-'+id, title:data.title||'Shared map', color:data.color||'#e0613a',
         style:data.style, layout:data.layout||'balanced', rootId:data.rootId,
         nodes:data.nodes||{}, links:data.links||[], vars:data.vars||{},
-        themeSize:data.themeSize, layoutConfig:data.layoutConfig, styleConfig:data.styleConfig, lookConfig:data.lookConfig, themeConfig:data.themeConfig });   // collaborators see the owner's spacing, style, look and colours
+        themeSize:data.themeSize, layoutParams:data.layoutParams, layoutConfig:data.layoutConfig, styleConfig:data.styleConfig, lookConfig:data.lookConfig, themeConfig:data.themeConfig });   // collaborators see the owner's spacing, style, look and colours
   map._cloudView=id;
   map._opening=true;                 // opening a shared map isn't an edit - suppress the save pill until it settles
   if(editable){ map._cloudEdit={ id, token }; }
@@ -18020,7 +18828,10 @@ else loadQotd();
     // Self-hosted: every map belongs to the signed-in account. Not signed in ->
     // the sign-in overlay; a mid-session 401 drops back here via onUnauthorized.
     if(loggedIn){
-      ServerStore.onUnauthorized=handleServerSignOut;
+      // A hosted deployment owns its own session: a 401 from the standalone
+      // server API is not a sign-out there, it only means the host does not
+      // mount that API. Everywhere else a mid-session 401 drops back to login.
+      if(!window.MINDSPARK_HOST) ServerStore.onUnauthorized=handleServerSignOut;
       showUserPill();
       initPublishButton();
       await proceedBoot(); await _openSharedAfterBoot();
@@ -18030,4 +18841,8 @@ else loadQotd();
   } else {
     await proceedBoot(); await _openSharedAfterBoot();
   }
-})().catch(e=>{ console.error(e); if(!map) createMap(); });
+})().catch(e=>{
+  console.error(e);
+  if(window.MINDSPARK_HOST){ window.MINDSPARK_HOST.onError(e); return; }
+  if(!map) createMap();
+});

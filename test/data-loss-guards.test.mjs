@@ -12,7 +12,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { loadFns, extractConst, extractFunction } from './helpers/load-app-fns.mjs';
 
-const SRC = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+// Normalize line endings: this file slices source around newlines, and a
+// Windows checkout hands us CRLF even though the committed file is LF.
+const SRC = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const fn = name => extractFunction(name);
 let n = 0;
 const { normalizeLoadedMap } = loadFns(['normalizeLoadedMap', 'sanitizeMapData', 'sanitizeNodeFields', 'repairTree', 'safeColor', 'safeImageUrl'], {
@@ -23,9 +25,9 @@ const { normalizeLoadedMap } = loadFns(['normalizeLoadedMap', 'sanitizeMapData',
 describe('version history', () => {
   test('a loaded version keeps its per-map settings', () => {
     const v = normalizeLoadedMap({ id: 'm', title: 'T', rootId: 'r', nodes: { r: { text: 'R', parent: null } },
-      layoutPreset: 'tl', layoutConfig: { balanced: { hGap: 90 } }, styleConfig: { modern: { dash: 3 } },
+      layoutPreset: 'tl', layoutParams: { colGap: 64, rowGap: 16 }, layoutConfig: { balanced: { hGap: 90 } }, styleConfig: { modern: { dash: 3 } },
       lookConfig: { office: { nodeSize: 1.2 } }, themeConfig: { light: { paper: '#fff' } }, frontmatter: '---\na: 1\n---' });
-    for (const k of ['layoutPreset', 'layoutConfig', 'styleConfig', 'lookConfig', 'themeConfig', 'frontmatter']) assert.ok(v[k], k);
+    for (const k of ['layoutPreset', 'layoutParams', 'layoutConfig', 'styleConfig', 'lookConfig', 'themeConfig', 'frontmatter']) assert.ok(v[k], k);
   });
 
   test('previewing makes the map read-only and marks the preview object', () => {

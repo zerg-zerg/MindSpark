@@ -1301,6 +1301,14 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .node{position:absolute;background:var(--card-bg);border:1.5px solid var(--line);border-radius:var(--node-radius, 12px);padding:calc(var(--node-pad-y, 9px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 15px) * var(--theme-pad-scale, 1));font-size:calc(15px * var(--look-node-size, 1));font-weight:500;line-height:1.35;box-shadow:var(--shadow);width:max-content;max-width:240px;min-width:34px;user-select:none;transition:background-color .3s ease,color .3s ease,box-shadow .15s,border-color .15s,transform .06s;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box}
   .node:hover{box-shadow:var(--shadow-lg)}
   .node.root{font-family:var(--serif);font-weight:600;font-size:calc(19px * var(--look-node-size, 1));padding:calc(var(--node-pad-y, 12px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 22px) * var(--theme-pad-scale, 1));border-width:0}
+
+  /* Tree table cells are sized by the layout engine, not by their text. The
+     class is removed for one measurement pass per render() so the natural size
+     underneath is still known (see the cell pass at the end of render()). */
+  #viewport[data-layout="treetable"] .node.tt-cell{width:var(--tt-w) !important;height:var(--tt-h) !important;max-width:none !important}
+  /* A cell fills its column, so dragging one corner would be overwritten by
+     the next render. Column and row spacing live in Layout settings instead. */
+  #viewport[data-layout="treetable"] .node .resize-grip{display:none}
   .node.sel{outline:2.5px solid var(--accent);outline-offset:2px}
   .node.editing{cursor:text;user-select:text;outline:none !important;box-shadow:none}
   .node.editing .node-text{outline:none}
@@ -1713,6 +1721,19 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     background:none !important; border:none !important; box-shadow:none !important;
     padding:4px 8px; min-width:0;
   }
+
+  /* Organic: Tony Buzan's hand-drawn Mind Map. No cards - each word sits on
+     its own line, which is the node's bottom border in its branch colour and
+     weight (--branch / --branch-w, set per node by render()). The tapered
+     curves joining those lines are filled shapes from organicEdgePath().
+     data-depth is the real depth, so depth 1 marks the main branches, whose
+     words are bolder and take their branch's colour, as Buzan drew them.
+     Padding carries the theme-size multiplier like every other style, so the
+     PNG export's matching inset stays in step with the live canvas. */
+  #viewport[data-style="organic"]  {--edge-color:var(--line-2);--edge-width:6}
+  #viewport[data-style="organic"]  .node{background:transparent; border:none; border-bottom:var(--branch-w, 2px) solid var(--branch, var(--line-2)); border-radius:0; box-shadow:none; padding:calc(var(--node-pad-y, 3px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 15px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-y, 2px) * var(--theme-pad-scale, 1))}
+  #viewport[data-style="organic"]  .node[data-depth="1"]{font-weight:700; font-size:calc(16px * var(--look-node-size, 1)); color:color-mix(in srgb, var(--branch, var(--ink)) 60%, var(--ink))}
+  #viewport[data-style="organic"]  .node.root{border:none; border-radius:var(--node-radius, 28px); padding:calc(var(--node-pad-y, 12px) * var(--theme-pad-scale, 1)) calc(var(--node-pad-x, 22px) * var(--theme-pad-scale, 1)); box-shadow:0 6px 18px color-mix(in srgb, var(--ink) 16%, transparent)}
 
   /* Cascades the pencil font to every part of the app that already
      references --sans/--serif (sidebar, modals, buttons, topbar, and
@@ -4160,10 +4181,9 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
          attached picture should be shown in full, so `contain` + auto
          dimensions let it keep its own aspect ratio.
        - .node caps at 240px, which squeezed every picture regardless of its
-         real size. Images are down-scaled to 360px wide on attach
-         (readImageFile), so 400px here lets one display at natural size
-         including the node's 15px horizontal padding, while still bounding
-         how large a card can get. */
+         real size. 400px here bounds how large a card can get. Images are
+         stored at up to 1200px wide (imageAttachSize in app.js), 3x this
+         cap, so they stay sharp on HiDPI screens and when zoomed in. */
   .node .node-image{
     max-width:100%; max-height:280px; width:auto; height:auto;
     border-radius:8px; object-fit:contain;
@@ -4265,19 +4285,23 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
 
   /* ===== Sidebar duplicate button ===== */
 
-  /* ===== Breadcrumb (floating pill, anchored under the topbar's left edge) =====
-     Hidden by default; expands (fades in) while the mouse is over the overview
-     in the status bar - the .shown class is toggled from JS. */
+  /* ===== Breadcrumb (floating pill, centred over the canvas) =====
+     Hidden until the selection has a path; syncBreadcrumb() toggles .shown.
+     Modern bars reveals it as soon as a path exists, while the docked shells
+     keep the overview-hover reveal. It is anchored to the stage, not the
+     viewport: the modern shell begins the canvas to the right of the sidebar,
+     so a fixed left:14px pill sat over the sidebar instead of the scene. The
+     floating shells (classic/rail/zen) reposition it below their topbar. */
   .breadcrumb{
-    position:fixed; top:56px; left:14px; transform:none;
+    position:absolute; top:14px; left:50%; transform:translateX(-50%) translateY(-4px);
     display:flex; align-items:center; gap:1px; z-index:90;
     background:var(--chrome); border:1px solid var(--chrome-edge);
     border-radius:10px; box-shadow:var(--shadow); padding:3px 6px;
     max-width:min(70vw, 720px); overflow:hidden; font-family:var(--sans);
-    opacity:0; pointer-events:none; transform:translateY(-4px);
+    opacity:0; pointer-events:none;
     transition:opacity .16s ease, transform .16s ease;
   }
-  .breadcrumb.shown{opacity:1; pointer-events:auto; transform:translateY(0)}
+  .breadcrumb.shown{opacity:1; pointer-events:auto; transform:translateX(-50%) translateY(0)}
   .breadcrumb .bc-crumb{
     border:none; background:transparent; cursor:pointer;
     font-family:inherit; font-size:12px; color:var(--ink-soft);
@@ -4359,7 +4383,9 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   body.shared-view .topbar{ grid-column:1; grid-row:1; }
   body.shared-view .stage{ grid-column:1; grid-row:3; }
   body.shared-view .statusbar{ grid-column:1; grid-row:4; }
-  body.shared-view .breadcrumb{ top:97px; left:14px; }
+  /* The shared banner is outside the grid, so this one stays viewport-fixed. */
+  body.shared-view .breadcrumb{ position:fixed; top:97px; left:50%; transform:translateX(-50%) translateY(-4px); }
+  body.shared-view .breadcrumb.shown{ transform:translateX(-50%) translateY(0); }
   body.shared-view #mapTitle{ pointer-events:none; max-width:none; }
   body.shared-view .node{ cursor:default; }
   /* Read-only: no node editing affordances (fold toggle + notes stay). */
@@ -4575,13 +4601,25 @@ body.no-banner.shared-view .stage{ top:0; }
   html{scrollbar-color:var(--line-2,var(--line)) transparent;scrollbar-width:thin}
 }
 
+/* ===== Map print (Export -> Print map) =====
+   #mapPrintRoot holds the background-free PNG render that printMapImage()
+   builds on demand; it is the only thing on the page while printing. */
+#mapPrintRoot{display:none}
+@media print{
+  html.map-printing body > *:not(#mapPrintRoot){display:none !important}
+  html.map-printing, html.map-printing body, html.map-printing #mapPrintRoot{background:#fff !important}
+  html.map-printing #mapPrintRoot{display:flex !important;align-items:flex-start;justify-content:center;position:static !important}
+  html.map-printing #mapPrintRoot img{display:block;max-width:100%;max-height:calc(100vh - 2px);width:auto;height:auto;object-fit:contain;
+    -webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+
 /* ===== PDF export (markdown preview -> browser print -> Save as PDF) =====
    #mdPrintRoot is populated on demand by mdDownloadPdf() and is otherwise empty/hidden.
    Forces light, ink-friendly colors regardless of the app's active theme. */
 #mdPrintRoot{display:none}
 @media print{
-  body.md-printing > *:not(#mdPrintRoot){display:none !important}
-  body.md-printing #mdPrintRoot{
+  html.md-printing body > *:not(#mdPrintRoot){display:none !important}
+  html.md-printing #mdPrintRoot{
     display:block !important;position:static !important;padding:0 32px;
     color:#1a1a1a;background:#fff;
     font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
