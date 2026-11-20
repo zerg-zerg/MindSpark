@@ -8137,18 +8137,24 @@ function showNotesEditor(nodeId){
     }
   }catch(e){}
   document.body.appendChild(popup);
+  const editor=popup.querySelector('.np-editor');
+  editor.innerHTML = sanitizeNotes(n.notes||'');   // safe: inert-parsed, whitelisted
+  npRenderAll(editor);                              // saved $...$ shows rendered from the start
   // Place the popup beside its node (not centred over the stage): just to the
   // right of the node, flipping to its left when the right edge would overflow.
   // Node rects and pointer deltas are raw/visual px (they scale with CSS zoom),
   // while style.left/top are logical px - so divide through by _uiZ(), the same
   // factor _stageSize()/_stagePoint() use. Every drag/resize delta does too.
+  // Content is in place first so the height measured below is the real one.
   const z=_uiZ();
   const vw=window.innerWidth/z, vh=window.innerHeight/z;
   const nodeEl=_nodeEls.get(nodeId) || document.querySelector(`.node[data-id="${nodeId}"]`);
+  const prect=popup.getBoundingClientRect();
+  const pw=prect.width/z || 340;
+  const ph=prect.height/z || 240;
   let left, top;
   if(nodeEl){
     const nr=nodeEl.getBoundingClientRect();
-    const pw=popup.getBoundingClientRect().width/z || 340;
     left=nr.right/z+14;
     top =nr.top/z;
     if(left+pw>vw-8) left=nr.left/z-pw-14;        // flip to the node's left
@@ -8156,17 +8162,16 @@ function showNotesEditor(nodeId){
     if(left+pw>vw-8) left=Math.max(8, vw-pw-8);   // still too wide: clamp on-screen
   }else{
     const r=stage.getBoundingClientRect();
-    left=r.left/z + r.width/z/2 - 170;
+    left=r.left/z + r.width/z/2 - pw/2;
     top =r.top/z + 70;
   }
+  // Keep the whole popup on screen: it opens at the node's top and grows down,
+  // so lift it until its bottom edge fits, and never let it run off the top.
+  if(top+ph>vh-8) top=vh-8-ph;
   if(top<8) top=8;
-  if(top+40>vh) top=Math.max(8, vh-120);
   popup.style.left=left+'px';
   popup.style.top =top+'px';
   popup.addEventListener('mousedown',e=>e.stopPropagation());
-  const editor=popup.querySelector('.np-editor');
-  editor.innerHTML = sanitizeNotes(n.notes||'');   // safe: inert-parsed, whitelisted
-  npRenderAll(editor);                              // saved $...$ shows rendered from the start
   // A read-only map shows its notes but does not let them be edited or saved.
   const _ro = READONLY;
   if(_ro){

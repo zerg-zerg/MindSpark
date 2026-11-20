@@ -1580,8 +1580,6 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     border-top:none;
     font-family:var(--sans);
     overflow:hidden;
-    transform:rotate(-1deg);          /* slight sticky-note tilt */
-    transform-origin:top center;
   }
   .notes-popup.np-dragging,
   .notes-popup.np-resizing{user-select:none; -webkit-user-select:none}
