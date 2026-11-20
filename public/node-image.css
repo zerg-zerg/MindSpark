@@ -65,6 +65,99 @@
   font-family: var(--sans, system-ui, sans-serif);
 }
 
+/* Clicked open: it stays until dismissed, so it takes the pointer (the close
+   button needs it) and gets a little more room to breathe. */
+.node-image-preview.pinned {
+  pointer-events: auto;
+  padding: 6px;
+}
+
+.node-image-preview.pinned img {
+  /* Default box for the pinned image. node-image.js overrides width/height (and
+     clears these caps) for the x1.5 / x2 zoom, because an image smaller than the
+     box is only ever capped, never grown, by max-width - the zoom has to set a
+     real size, capped to the viewport itself. */
+  max-width: min(520px, calc(100vw - 28px));
+  max-height: min(76vh, calc(100vh - 92px));
+}
+
+.node-image-preview-zoom {
+  display: none;
+}
+
+.node-image-preview.pinned .node-image-preview-zoom {
+  display: flex;
+  gap: 4px;
+  position: absolute;
+  top: 4px;
+  left: 4px;
+}
+
+.node-image-preview.pinned .node-image-zoom-btn {
+  margin: 0;
+  padding: 0 7px;
+  height: 22px;
+  border: 1px solid var(--line, var(--line-2, #d8cfbf));
+  border-radius: 6px;
+  background: var(--card-bg, var(--node-bg, #fff));
+  color: var(--ink-soft, var(--ink, inherit));
+  font: 600 11px/1 var(--sans, system-ui, sans-serif);
+  cursor: pointer;
+  opacity: .85;
+  box-shadow: 0 1px 4px rgba(40, 30, 15, .18);
+  transition: opacity .12s ease;
+}
+
+.node-image-preview.pinned .node-image-zoom-btn:hover,
+.node-image-preview.pinned .node-image-zoom-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent, #e0613a);
+  outline-offset: 1px;
+}
+
+.node-image-preview.pinned .node-image-zoom-btn[aria-pressed="true"] {
+  opacity: 1;
+  border-color: var(--accent, #e0613a);
+  color: var(--accent, #e0613a);
+}
+
+.node-image-preview-close {
+  display: none;
+}
+
+.node-image-preview.pinned .node-image-preview-close {
+  display: block;
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line, var(--line-2, #d8cfbf));
+  border-radius: 50%;
+  background: var(--card-bg, var(--node-bg, #fff));
+  color: var(--ink-soft, var(--ink, inherit));
+  font: 15px/1 var(--sans, system-ui, sans-serif);
+  line-height: 22px;
+  text-align: center;
+  cursor: pointer;
+  opacity: .85;
+  box-shadow: 0 1px 4px rgba(40, 30, 15, .18);
+  transition: opacity .12s ease;
+}
+
+.node-image-preview.pinned .node-image-preview-close:hover,
+.node-image-preview.pinned .node-image-preview-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent, #e0613a);
+  outline-offset: 1px;
+}
+
+.node-image-preview.pinned .node-image-preview-cap {
+  padding-right: 26px;   /* never under the close button */
+}
+
 .node-image-preview img {
   display: block;
   max-width: 360px;
@@ -94,9 +187,10 @@
 }
 
 /* Touch devices get no hover preview at all (node-image.js also skips it based
-   on matchMedia('(hover: hover)')). */
+   on matchMedia('(hover: hover)')). A clicked-open panel is the only way to see
+   an attachment there, so it is NOT hidden. */
 @media (hover: none) {
-  .node-image-preview {
+  .node-image-preview:not(.pinned) {
     display: none !important;
   }
 }

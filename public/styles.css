@@ -1403,7 +1403,12 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     background:var(--paper); border:2px solid var(--edge-color, var(--line-2));
     font:600 10px/1 var(--sans); color:var(--ink-soft);
     cursor:pointer; user-select:none;
-    opacity:0; pointer-events:none; transition:opacity .12s, border-color .12s;
+    /* Fade out with a delay: the badge is 10px clear of the card, so a plain
+       .12s fade vanished before the pointer could cross the gap. The delay is
+       the safety net for the one frame at the card edge; the hover bridge below
+       does the real work. Fading IN is instant (the hover rule resets the
+       delay). */
+    opacity:0; pointer-events:none; transition:opacity .2s ease .15s, border-color .12s;
   }
   /* Stem bridging the gap the badge keeps away from the card edge, so the
      collapsed control still reads as hanging on the branch. The stem spans
@@ -1421,6 +1426,21 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .node .fold-btn[data-side="left"]{right:auto; left:-30px; transform:translateY(-50%)}
   .node .fold-btn[data-side="top"]{top:-30px; right:auto; left:50%; transform:translate(-50%,-50%)}
   .node .fold-btn[data-side="bottom"]{top:auto; bottom:-30px; right:auto; left:50%; transform:translate(-50%,50%)}
+  /* Invisible hover bridge. The badge floats 10px clear of the card, so the
+     pointer dropped `.node:hover` the instant it left the card and the badge
+     faded out before it could be reached - the "you can only get there along a
+     narrow line" complaint. This transparent pseudo-element spans that gap and
+     a comfortable band around it; being part of the badge, hovering it keeps
+     `.node:hover` alive for the whole trip from card to circle. It inherits the
+     badge's pointer-events, which are `none` at rest, so it never steals a
+     press from the canvas until the node is actually hovered. app.js treats a
+     press that lands on the bridge (outside the visible circle) as a press on
+     the card, so grabbing the branch area still selects/drags the node. */
+  .node .fold-btn::after{content:''; position:absolute; background:transparent}
+  .node .fold-btn[data-side="right"]::after{right:0; top:50%; width:30px; height:48px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="left"]::after{left:0; top:50%; width:30px; height:48px; transform:translateY(-50%)}
+  .node .fold-btn[data-side="top"]::after{top:0; left:50%; width:48px; height:30px; transform:translateX(-50%)}
+  .node .fold-btn[data-side="bottom"]::after{bottom:0; left:50%; width:48px; height:30px; transform:translateX(-50%)}
   /* Both faces fill the circle dead-centre; the user's hover swaps between
      them (opacity only - the glyphs never move). */
   .node .fold-btn .fold-count, .node .fold-btn .fold-icon{
@@ -1430,7 +1450,7 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .node:hover .fold-btn .fold-count{opacity:0}
   .node:hover .fold-btn .fold-icon{opacity:1}
   .node .fold-btn.collapsed{color:var(--ink)}
-  .node:hover .fold-btn, .node.collapsed .fold-btn{opacity:1; pointer-events:auto}
+  .node:hover .fold-btn, .node.collapsed .fold-btn{opacity:1; pointer-events:auto; transition-delay:0s,0s}
   .node.editing .fold-btn{display:none}
 
   /* Add dots: three junction circles on the selected node's sides. The dot
@@ -1550,11 +1570,12 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   }
   .notes-popup{
     position:fixed; z-index:1100;
+    display:flex; flex-direction:column;
     background:var(--sticky);
     color:var(--sticky-ink);
     border-radius:4px 4px 6px 6px;
     box-shadow:0 14px 34px rgba(0,0,0,.34), 0 2px 5px rgba(0,0,0,.16);
-    width:340px; max-width:92vw;
+    width:340px; max-width:92vw; max-height:92vh;
     border:1px solid var(--sticky-edge);
     border-top:none;
     font-family:var(--sans);
@@ -1562,12 +1583,30 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
     transform:rotate(-1deg);          /* slight sticky-note tilt */
     transform-origin:top center;
   }
-  .notes-popup::before{
-    content:''; display:block; height:8px;
+  .notes-popup.np-dragging,
+  .notes-popup.np-resizing{user-select:none; -webkit-user-select:none}
+  /* The sticky-note "tape" is now a real header, so the popup can be dragged by
+     it. The × closes the popup (same as Cancel/Close). */
+  .notes-popup .np-head{
+    display:flex; align-items:center; gap:8px;
+    flex:0 0 auto; height:30px; padding:0 6px 0 12px;
     background:linear-gradient(180deg, color-mix(in srgb, var(--sticky-edge) 80%, #000 6%), var(--sticky-edge));
+    cursor:grab; user-select:none; -webkit-user-select:none;
   }
+  .notes-popup.np-dragging .np-head{cursor:grabbing}
+  .notes-popup .np-head .np-title{
+    font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    color:color-mix(in srgb, var(--sticky-ink) 78%, transparent);
+  }
+  .notes-popup .np-head .np-x{
+    margin-left:auto; width:22px; height:22px; padding:0;
+    border:none; background:transparent; color:var(--sticky-ink);
+    font-size:13px; line-height:1; border-radius:5px; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center;
+  }
+  .notes-popup .np-head .np-x:hover{background:color-mix(in srgb, var(--sticky-ink) 16%, transparent)}
   .notes-popup .np-toolbar{
-    display:flex; align-items:center; gap:1px;
+    display:flex; align-items:center; gap:1px; flex:0 0 auto;
     padding:7px 9px;
     border-bottom:1px solid color-mix(in srgb, var(--sticky-edge) 70%, transparent);
     background:color-mix(in srgb, var(--sticky-edge) 30%, var(--sticky));
@@ -1585,7 +1624,8 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .notes-popup .np-toolbar button i{font-style:italic}
   .notes-popup .np-div{width:1px; height:20px; background:color-mix(in srgb, var(--sticky-edge) 80%, transparent); margin:0 4px}
   .notes-popup .np-editor{
-    padding:14px 16px; min-height:170px; max-height:50vh; overflow-y:auto;
+    flex:1 1 auto; min-height:120px; overflow-y:auto;
+    padding:14px 16px;
     font-family:var(--sans); font-size:14px; line-height:1.6;
     color:var(--sticky-ink); outline:none; background:transparent;
   }
@@ -1607,10 +1647,22 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .notes-popup .np-math[data-display="1"]{display:block; text-align:center; margin:.2em 0}
   .notes-popup .np-math:hover{background:color-mix(in srgb, var(--sticky-ink) 10%, transparent); outline:1px dashed color-mix(in srgb, var(--sticky-ink) 40%, transparent)}
   .notes-popup .np-actions{
-    display:flex; gap:8px; padding:10px 12px;
+    display:flex; gap:8px; padding:10px 24px 10px 12px; flex:0 0 auto;
     border-top:1px solid color-mix(in srgb, var(--sticky-edge) 70%, transparent);
     background:color-mix(in srgb, var(--sticky-edge) 22%, var(--sticky));
     align-items:center;
+  }
+  /* Bottom-right resize grip. The popup is position:fixed, so this absolute
+     child anchors to its corner; drag it to set a new width/height. */
+  .notes-popup .np-resize{
+    position:absolute; right:0; bottom:0; width:20px; height:20px;
+    cursor:nwse-resize; z-index:3;
+  }
+  .notes-popup .np-resize::after{
+    content:''; position:absolute; right:4px; bottom:4px; width:8px; height:8px;
+    border-right:2px solid color-mix(in srgb, var(--sticky-ink) 55%, transparent);
+    border-bottom:2px solid color-mix(in srgb, var(--sticky-ink) 55%, transparent);
+    border-radius:0 0 3px 0;
   }
   .notes-popup button{
     padding:7px 14px; border-radius:7px; border:1px solid var(--sticky-edge);

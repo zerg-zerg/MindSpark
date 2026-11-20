@@ -12,6 +12,13 @@
  * Nothing runs at load time; it only defines window.MSNodeImage, so load order
  * relative to app.js and image-store.js does not matter.
  *
+ * Interaction: hovering the badge shows a preview that follows the pointer and
+ * goes away on its own; clicking it opens the SAME panel pinned, with a close
+ * button and x1.5 / x2 zoom buttons, so it stays put no matter where the mouse
+ * goes (and it is the only way to see an attachment on a touch screen). Escape,
+ * a click outside it, or the close button dismiss it; ctrl/cmd-click keeps
+ * opening the image in a new tab.
+ *
  * API (window.MSNodeImage):
  *   decorate(el, node, opts)   opts = { mode: 'icon' | 'inline' }
  *       mode 'icon'  -> adds/updates a 20x20 thumbnail button as the FIRST
@@ -28,13 +35,19 @@
   'use strict';
 
   var HOVER_DELAY = 220;
+  var ZOOMS = [1.5, 2];     // pinned panel zoom steps (click the active one to reset)
 
   var _preview = null;      // singleton <div class="node-image-preview">
   var _previewImg = null;
   var _previewCap = null;
+  var _closeBtn = null;     // only shown while the panel is pinned
+  var _zoomBar = null;      // x1.5 / x2 controls, pinned panel only
+  var _zoom = 1;            // current pinned zoom factor
   var _timer = 0;
   var _activeBtn = null;    // badge the current preview/timer belongs to
   var _hovered = false;
+  var _pinned = false;      // opened by a click: stays until dismissed
+  var _skipFocusPreview = false;   // one turn: closing must not re-open on the refocus
   var _token = 0;           // guards async image load callbacks
   var _docBound = false;
 
@@ -95,14 +108,37 @@
     if (_docBound) return;
     _docBound = true;
     // capture: also catches scrolling inside the canvas/panels, not just the page
-    document.addEventListener('scroll', hidePreview, { capture: true, passive: true });
-    document.addEventListener('pointerdown', hidePreview, { capture: true, passive: true });
+    document.addEventListener('scroll', onViewportChange, { capture: true, passive: true });
+    // The canvas zooms on wheel without scrolling anything, which moves the node
+    // out from under a pinned panel; re-place it there too.
+    document.addEventListener('wheel', onViewportChange, { capture: true, passive: true });
+    document.addEventListener('pointerdown', onDocPointerDown, { capture: true, passive: true });
     document.addEventListener('keydown', onKeyDown, false);
+    window.addEventListener('resize', onViewportChange, false);
     window.addEventListener('blur', hidePreview, false);
   }
 
+  // A pinned panel follows its badge; a hover preview just goes away.
+  function onViewportChange() {
+    if (_pinned) {
+      applyZoomSize();
+      if (_preview && _activeBtn) place(_preview, _activeBtn);
+      return;
+    }
+    hidePreview();
+  }
+
+  function onDocPointerDown(ev) {
+    if (!_pinned) { hidePreview(); return; }
+    var t = ev.target;
+    if ((_preview && _preview.contains(t)) || (_activeBtn && _activeBtn.contains(t))) return;
+    hidePreview();
+  }
+
   function onKeyDown(ev) {
-    if (ev && (ev.key === 'Escape' || ev.key === 'Esc')) hidePreview();
+    if (!ev || (ev.key !== 'Escape' && ev.key !== 'Esc')) return;
+    if (_pinned) { closePinned(true); return; }
+    hidePreview();
   }
 
   function ensurePreview() {
@@ -119,9 +155,46 @@
     _previewCap = document.createElement('div');
     _previewCap.className = 'node-image-preview-cap';
 
+    _closeBtn = document.createElement('button');
+    _closeBtn.type = 'button';
+    _closeBtn.className = 'node-image-preview-close';
+    _closeBtn.setAttribute('aria-label', '\u0417\u0430\u043A\u0440\u044B\u0442\u044C');
+    _closeBtn.textContent = '\u00D7';
+    _closeBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closePinned(true);
+    });
+
+    _zoomBar = document.createElement('div');
+    _zoomBar.className = 'node-image-preview-zoom';
+    ZOOMS.forEach(function (z) {
+      var zb = document.createElement('button');
+      zb.type = 'button';
+      zb.className = 'node-image-zoom-btn';
+      zb.dataset.zoom = String(z);
+      zb.textContent = '\u00D7' + z;   // x1.5 / x2
+      zb.setAttribute('aria-pressed', 'false');
+      zb.setAttribute('aria-label', '\u0423\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C \u0432 ' + z + ' \u0440\u0430\u0437\u0430');
+      zb.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        // Click the active step again to drop back to 1x.
+        setZoom(_zoom === z ? 1 : z);
+      });
+      _zoomBar.appendChild(zb);
+    });
+
     _preview.appendChild(_previewImg);
     _preview.appendChild(_previewCap);
+    _preview.appendChild(_closeBtn);
+    _preview.appendChild(_zoomBar);
     document.body.appendChild(_preview);
+
+    // Clicking the panel (or its close button) must not reach the canvas, where
+    // it would deselect the node or start a pan.
+    _preview.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
+    _preview.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
 
     _previewImg.addEventListener('load', function () {
       if (!_preview || !_previewImg) return;
@@ -165,6 +238,39 @@
     } catch (_e) { /* nothing more we can do */ }
   }
 
+  // Pinned zoom: x1.5 / x2 multiply the image's default (1x) display size, then
+  // the result is kept inside the viewport. The stylesheet's caps are cleared
+  // inline because the scaled size may exceed the 1x defaults.
+  function applyZoomSize() {
+    if (!_pinned || !_previewImg) return;
+    var nw = _previewImg.naturalWidth || 0;
+    var nh = _previewImg.naturalHeight || 0;
+    if (!nw || !nh) return;
+    var availW = Math.max(80, window.innerWidth - 28);
+    var availH = Math.max(80, window.innerHeight - 92);
+    // 1x: fit the natural size inside the default box (520px wide, 76vh tall).
+    var baseK = Math.min(1, 520 / nw, (0.76 * window.innerHeight) / nh, availW / nw, availH / nh);
+    var w = nw * baseK * _zoom;
+    var h = nh * baseK * _zoom;
+    var k = Math.min(1, availW / w, availH / h);
+    _previewImg.style.width = Math.round(w * k) + 'px';
+    _previewImg.style.height = Math.round(h * k) + 'px';
+    _previewImg.style.maxWidth = 'none';
+    _previewImg.style.maxHeight = 'none';
+  }
+
+  // Sets the zoom factor and repaints/re-places the pinned panel.
+  function setZoom(z) {
+    _zoom = (z === 1.5 || z === 2) ? z : 1;
+    if (_zoomBar) {
+      Array.prototype.forEach.call(_zoomBar.children, function (b) {
+        b.setAttribute('aria-pressed', b.dataset.zoom === String(_zoom) ? 'true' : 'false');
+      });
+    }
+    applyZoomSize();
+    if (_preview && _activeBtn) place(_preview, _activeBtn);
+  }
+
   function finishPreview() {
     if (!_preview || !_previewImg || !_activeBtn) return;
     var alt = _previewImg.dataset.alt || '';
@@ -177,6 +283,7 @@
     _previewCap.textContent = cap;
     _previewCap.style.display = cap ? '' : 'none';
 
+    applyZoomSize();
     place(_preview, _activeBtn);
     _preview.style.visibility = '';
   }
@@ -186,11 +293,17 @@
     if (!btn.isConnected) return;
     if (!canHover()) return;
     if (isEditing(btn.parentElement)) return;
-
-    var st = btn._msImageState;
-    if (!st || !st.src) return;
+    if (!btn._msImageState || !btn._msImageState.src) return;
 
     ensurePreview();
+    renderImage(btn);
+  }
+
+  // Swap in the badge's current image; the panel stays hidden until it loads so
+  // it is never placed at the previous image's size.
+  function renderImage(btn) {
+    if (!_preview || !_previewImg || !btn) return;
+    var st = btn._msImageState || {};
     var token = ++_token;
     _preview.style.visibility = 'hidden';
     _preview.style.left = '0px';
@@ -201,28 +314,79 @@
     _previewImg.dataset.token = String(token);
     _previewImg.dataset.alt = st.alt || '';
     _previewImg.removeAttribute('src');
-    _previewImg.src = st.src;
+    _previewImg.src = st.src || '';
 
     // Cached/decoded images may never fire `load`; complete covers that.
     if (_previewImg.complete && _previewImg.naturalWidth) finishPreview();
   }
 
-  function hidePreview() {
+  // Opened by a click: the panel ignores the pointer from then on and only the
+  // close button, Escape or a press outside it take it away.
+  function openPinned(btn) {
+    if (!btn || !btn.isConnected) return;
+    var st = btn._msImageState;
+    if (!st || !st.src) return;
+    if (isEditing(btn.parentElement)) return;
+    if (_timer) {
+      clearTimeout(_timer);
+      _timer = 0;
+    }
     _hovered = false;
+    _activeBtn = btn;
+    _pinned = true;
+
+    ensurePreview();
+    _preview.classList.add('pinned');
+    _preview.setAttribute('aria-hidden', 'false');
+    _preview.setAttribute('role', 'dialog');
+    _preview.setAttribute('aria-label', '\u0418\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435');
+    btn.setAttribute('aria-expanded', 'true');
+    setZoom(1);
+    renderImage(btn);
+
+    try { _closeBtn.focus({ preventScroll: true }); }
+    catch (_e) { try { _closeBtn.focus(); } catch (_e2) { /* not focusable */ } }
+  }
+
+  function closePinned(returnFocus) {
+    if (!_pinned) return false;
+    var btn = _activeBtn;
+    // Returning focus to the badge fires its `focus` handler, which would open a
+    // hover preview again 220ms later; skip that one turn.
+    _skipFocusPreview = !!returnFocus;
+    hidePreview();
+    if (returnFocus && btn && btn.isConnected) {
+      try { btn.focus({ preventScroll: true }); }
+      catch (_e) { try { btn.focus(); } catch (_e2) { /* gone */ } }
+    }
+    setTimeout(function () { _skipFocusPreview = false; }, 0);
+    return true;
+  }
+
+  function hidePreview() {
+    var btn = _activeBtn;
+    _hovered = false;
+    _pinned = false;
     _activeBtn = null;
     _token++;
     if (_timer) {
       clearTimeout(_timer);
       _timer = 0;
     }
+    if (btn && btn.isConnected) btn.setAttribute('aria-expanded', 'false');
     if (_preview && _preview.parentNode) _preview.parentNode.removeChild(_preview);
     _preview = null;
     _previewImg = null;
     _previewCap = null;
+    _closeBtn = null;
+    _zoomBar = null;
+    _zoom = 1;
   }
 
   function onEnter(btn) {
     if (!canHover()) return;
+    if (_pinned) return;         // a pinned panel owns the badge until dismissed
+    if (_skipFocusPreview) return;
     if (isEditing(btn.parentElement)) return;
     hidePreview();               // only ever one preview/timer
     _hovered = true;
@@ -234,6 +398,7 @@
   }
 
   function onLeave(btn) {
+    if (_pinned && _activeBtn === btn) return;
     if (_activeBtn === btn) hidePreview();
   }
 
@@ -244,6 +409,8 @@
     btn.type = 'button';
     btn.className = 'node-image-badge';
     btn.setAttribute('aria-label', '\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435');
+    btn.setAttribute('aria-haspopup', 'dialog');
+    btn.setAttribute('aria-expanded', 'false');
     btn.title = '';
 
     var img = document.createElement('img');
@@ -264,11 +431,18 @@
 
     btn.addEventListener('click', function (ev) {
       ev.stopPropagation();
-      hidePreview();
+      ev.preventDefault();
       var st = btn._msImageState;
       var href = st && st.src;
       if (!href) return;
-      try { window.open(href, '_blank', 'noopener'); } catch (_e) { /* blocked */ }
+      // Ctrl/cmd-click keeps the browser habit of opening the image in a tab.
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
+        hidePreview();
+        try { window.open(href, '_blank', 'noopener'); } catch (_e) { /* blocked */ }
+        return;
+      }
+      if (_pinned && _activeBtn === btn) { closePinned(true); return; }
+      openPinned(btn);
     });
 
     return btn;

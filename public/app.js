@@ -1924,8 +1924,22 @@ function render(){
       const cnt=document.createElement('span'); cnt.className='fold-count'; cnt.textContent=_kidCount;
       const ico=document.createElement('span'); ico.className='fold-icon'; ico.textContent=n.collapsed?'+':'−';
       fb.appendChild(cnt); fb.appendChild(ico);
-      fb.addEventListener('mousedown',ev=>ev.stopPropagation());
-      fb.addEventListener('click',ev=>ev.stopPropagation());
+      // The badge grows an invisible hover bridge (styles.css ::after) so the
+      // pointer can travel from the card to the circle without losing hover.
+      // Only the visible circle swallows the press: a press on the bridge falls
+      // through to the card, so grabbing the branch area still selects/drags the
+      // node, and a click on the bridge is swallowed below so it never toggles.
+      // A coordinate-less (synthetic) event is treated as a hit on the circle.
+      fb.addEventListener('mousedown',ev=>{
+        const r=fb.getBoundingClientRect();
+        if((!ev.clientX&&!ev.clientY)||(ev.clientX>=r.left&&ev.clientX<=r.right&&ev.clientY>=r.top&&ev.clientY<=r.bottom)) ev.stopPropagation();
+      });
+      fb.addEventListener('click',ev=>{
+        ev.stopPropagation();
+        const r=fb.getBoundingClientRect();
+        if(!ev.clientX&&!ev.clientY) return;
+        if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom) ev.stopImmediatePropagation();
+      });
       // Looked up by id at click time, never through the `n` this element was
       // built from: the element outlives that object. Undo/redo, Markdown-mode
       // sync, a collab snapshot and a cloud merge all replace map.nodes with
@@ -8087,6 +8101,10 @@ function showNotesEditor(nodeId){
   popup.className='notes-popup';
   const has=(n.notes||'').replace(/<[^>]*>/g,'').trim().length>0;
   popup.innerHTML=`
+    <div class="np-head">
+      <span class="np-title">Notes</span>
+      <button class="np-x" title="Close" aria-label="Close">✕</button>
+    </div>
     <div class="np-toolbar">
       <button data-c="bold"          title="Bold"><b>B</b></button>
       <button data-c="italic"        title="Italic"><i>i</i></button>
@@ -8107,14 +8125,44 @@ function showNotesEditor(nodeId){
       ${has?'<button class="np-clear">Remove</button>':''}
       <button class="np-cancel">Cancel</button>
       <button class="np-save primary">Save</button>
-    </div>`;
-  const r=stage.getBoundingClientRect(), z=_uiZ();
-  // r.left/width/top are raw px (scale with UI-level display size); style.left/top are
-  // read as logical px, so divide through by the same factor _stageSize()/_stagePoint()
-  // already use before mixing them with the (logical) -240/70 constants below.
-  popup.style.left = (r.left/z + r.width/z/2 - 240) + 'px';
-  popup.style.top  = (r.top/z  + 70) + 'px';
+    </div>
+    <div class="np-resize" title="Resize"></div>`;
+  // Reuse the size the user last dragged the popup to. Stored globally (not per
+  // node) so it applies to every note popup, and skipped on phones where the
+  // CSS width (96vw) should win - mirrors how mindspark:sideW is handled.
+  try{
+    if(!window.matchMedia('(max-width: 720px)').matches){
+      const s=JSON.parse(localStorage.getItem('mindspark:notesSize')||'null');
+      if(s && s.w && s.h){ popup.style.width=s.w+'px'; popup.style.height=s.h+'px'; }
+    }
+  }catch(e){}
   document.body.appendChild(popup);
+  // Place the popup beside its node (not centred over the stage): just to the
+  // right of the node, flipping to its left when the right edge would overflow.
+  // Node rects and pointer deltas are raw/visual px (they scale with CSS zoom),
+  // while style.left/top are logical px - so divide through by _uiZ(), the same
+  // factor _stageSize()/_stagePoint() use. Every drag/resize delta does too.
+  const z=_uiZ();
+  const vw=window.innerWidth/z, vh=window.innerHeight/z;
+  const nodeEl=_nodeEls.get(nodeId) || document.querySelector(`.node[data-id="${nodeId}"]`);
+  let left, top;
+  if(nodeEl){
+    const nr=nodeEl.getBoundingClientRect();
+    const pw=popup.getBoundingClientRect().width/z || 340;
+    left=nr.right/z+14;
+    top =nr.top/z;
+    if(left+pw>vw-8) left=nr.left/z-pw-14;        // flip to the node's left
+    if(left<8) left=8;
+    if(left+pw>vw-8) left=Math.max(8, vw-pw-8);   // still too wide: clamp on-screen
+  }else{
+    const r=stage.getBoundingClientRect();
+    left=r.left/z + r.width/z/2 - 170;
+    top =r.top/z + 70;
+  }
+  if(top<8) top=8;
+  if(top+40>vh) top=Math.max(8, vh-120);
+  popup.style.left=left+'px';
+  popup.style.top =top+'px';
   popup.addEventListener('mousedown',e=>e.stopPropagation());
   const editor=popup.querySelector('.np-editor');
   editor.innerHTML = sanitizeNotes(n.notes||'');   // safe: inert-parsed, whitelisted
@@ -8175,6 +8223,48 @@ function showNotesEditor(nodeId){
   popup.querySelector('.np-cancel').onclick=close;
   popup.querySelector('.np-clear')?.addEventListener('click',()=>{
     delete map.nodes[nodeId].notes; pushHistory(); render(); close();
+  });
+  // The header × is the third way out, alongside Cancel/Close and Escape.
+  popup.querySelector('.np-x')?.addEventListener('click',e=>{ e.stopPropagation(); close(); });
+  // Drag by the header, resize by the corner grip. Both track the pointer on
+  // document so the gesture survives leaving the popup, and both divide the
+  // raw pointer delta by _uiZ() so they stay correct at any display size.
+  const head=popup.querySelector('.np-head');
+  if(head) head.addEventListener('mousedown',e=>{
+    if(e.target.closest('.np-x')) return;
+    e.preventDefault();
+    const dz=_uiZ(), sx=e.clientX, sy=e.clientY;
+    const sl=parseFloat(popup.style.left)||0, st=parseFloat(popup.style.top)||0;
+    popup.classList.add('np-dragging');
+    const mv=ev=>{ popup.style.left=(sl+(ev.clientX-sx)/dz)+'px'; popup.style.top=(st+(ev.clientY-sy)/dz)+'px'; };
+    const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); popup.classList.remove('np-dragging'); };
+    document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+  });
+  const grip=popup.querySelector('.np-resize');
+  if(grip) grip.addEventListener('mousedown',e=>{
+    e.preventDefault(); e.stopPropagation();
+    const dz=_uiZ(), sx=e.clientX, sy=e.clientY;
+    const rect=popup.getBoundingClientRect();
+    // Start from the current size; each move recomputes from that start plus the
+    // TOTAL delta (never accumulating), so the popup tracks the pointer 1:1.
+    const sw=parseFloat(popup.style.width) ||Math.round(rect.width/dz);
+    const sh=parseFloat(popup.style.height)||Math.round(rect.height/dz);
+    let lastW=Math.round(sw), lastH=Math.round(sh);
+    popup.classList.add('np-resizing');
+    const mv=ev=>{
+      const maxW=window.innerWidth/dz-16, maxH=window.innerHeight/dz-16;
+      lastW=Math.round(Math.max(260, Math.min(maxW, sw+(ev.clientX-sx)/dz)));
+      lastH=Math.round(Math.max(180, Math.min(maxH, sh+(ev.clientY-sy)/dz)));
+      popup.style.width=lastW+'px'; popup.style.height=lastH+'px';
+    };
+    const up=()=>{
+      document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up);
+      popup.classList.remove('np-resizing');
+      // Remember it for every later popup. Plain localStorage in try/catch, the
+      // same way mindspark:sideW is kept - a UI preference, not map data.
+      try{ localStorage.setItem('mindspark:notesSize', JSON.stringify({w:lastW,h:lastH})); }catch(_){}
+    };
+    document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
   });
   editor.addEventListener('keydown',e=>{
     e.stopPropagation();
