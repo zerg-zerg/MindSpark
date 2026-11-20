@@ -22,6 +22,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const uploads = require('./uploads');
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'mindspark.db');
@@ -402,7 +403,8 @@ const withPublicBase = (html) => html.replace(/<head[^>]*>/i, m => m + '<base hr
 // ---- tiny helpers --------------------------------------------------------
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css',
   '.json':'application/json', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon',
-  '.webmanifest':'application/manifest+json' };
+  '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif', '.webp':'image/webp',
+  '.avif':'image/avif', '.webmanifest':'application/manifest+json' };
 // Response types worth gzipping - every text-ish MIME above, and nothing that
 // is already compressed (png/ico). This Set is the decision: it used to sit here
 // as a list of file EXTENSIONS that nothing read, beside a hand-rolled MIME
@@ -478,6 +480,11 @@ function fileEntry(full, stat) {
   fileCache.set(full, row);
   return row;
 }
+
+// ---- uploads --------------------------------------------------------------
+// Image bytes live next to the database, so the one data volume Docker mounts
+// already covers them. Initialised once; handle() answers or declines per path.
+uploads.init({ db, dir: path.join(path.dirname(DB_PATH), 'uploads'), send, requireAuth, maxBytes: 8e6 });
 
 // ---- server --------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
@@ -670,6 +677,8 @@ const server = http.createServer(async (req, res) => {
 
     // Public: the deployment-mode probe the client uses before it knows anything.
     if (p === '/healthz') return send(res, 200, { ok: true });
+
+    if (await uploads.handle(req, res, p)) return;
 
     // ----- static files -----
     // A published link (/public/<guid>) is an SPA page: serve the app shell, which

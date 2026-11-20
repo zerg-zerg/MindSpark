@@ -29,6 +29,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700&family=Caveat:wght@500;700&family=Nunito:ital,wght@0,400;0,700;1,400;1,700&family=JetBrains+Mono:wght@400;700&family=Fredoka:wght@400;600&family=Oswald:wght@400;600&family=Roboto+Condensed:wght@400;600&family=Space+Mono:wght@400;700&family=Space+Grotesk:wght@400;500;700&family=Quicksand:wght@400;600;700&family=Anek+Latin:wght@400..800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./node-image.css">
 <script>
   // Apply the interface scale before paint (no flash). Saved choice wins;
   // otherwise pick a default by viewport size using continuous interpolation
@@ -488,6 +489,8 @@
 <!-- Template data, split out of app.js. Must load first: app.js
      references TEMPLATES/TEMPLATE_CATEGORIES, which are `const`. -->
 <script src="./templates.js" defer></script>
+<script src="./image-store.js" defer></script>
+<script src="./node-image.js" defer></script>
 <script src="./app.js" defer></script>
 <script>
   // Service worker: offline access to the app shell. Deliberately skipped

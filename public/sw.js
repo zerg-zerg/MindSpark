@@ -38,6 +38,9 @@ const SHELL = [
   './app.js',
   './templates.js',
   './styles.css',
+  './node-image.css',
+  './image-store.js',
+  './node-image.js',
   './quotes.json',
   './quote-providers.json',
   './words.json',
@@ -77,6 +80,10 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;   // fonts, avatars, GitHub API
   if (url.pathname.startsWith(BASE + 'api/')) return; // never serve stale map data
+  // Uploaded images are immutable and served with a long-lived cache header by
+  // the app server; keeping them out of CacheStorage (mirroring /api/) stops a
+  // few large uploads from filling the shell cache.
+  if (url.pathname.startsWith(BASE + 'files/') || url.pathname.startsWith('/files/')) return;
   if (url.pathname === BASE + 'healthz') return;      // storage-mode probe must be live
 
   const isHTML = request.mode === 'navigate' ||

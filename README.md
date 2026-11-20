@@ -330,6 +330,9 @@ A plain REST API - build other clients, scripts, or integrations on top of it. E
 | `POST`   | `/api/maps`      | Create a map (body = map JSON)       |
 | `PUT`    | `/api/maps/:id`  | Update / upsert a map                |
 | `DELETE` | `/api/maps/:id`  | Delete a map                         |
+| `POST`   | `/api/files`     | Upload an image (`Content-Type: image/png` etc.); `201 {url:'/files/<name>'}` |
+| `GET`    | `/files/:name`   | Serve an uploaded image (public)     |
+| `DELETE` | `/api/files/:name` | Delete an uploaded image           |
 | `GET`    | `/healthz`       | Health check (public)                |
 
 Sign-in returns an `ms_session` cookie. Unauthenticated calls to the map endpoints answer `401`; reaching another user's map answers `404`, because map ids are namespaced per owner.

@@ -1716,6 +1716,11 @@ function render(){
       el.style.removeProperty('--tt-h');
     }
   }
+  // Attached images render as a compact badge by default (public/node-image.js)
+  // or as the full inline thumbnail. Resolved once per render and carried in
+  // every node's signature below, so flipping the preference rebuilds the
+  // cards instead of reusing elements in the old display mode.
+  const _imgMode = imageDisplayMode();
   // nodes
   for(let _oi=0;_oi<_order.length;_oi++){
     const id=_order[_oi];
@@ -1728,7 +1733,7 @@ function render(){
     // The badge itself is built further down from these two locals.
     const _kidCount=childrenOf(id).length;
     const _foldSide=hasKids?foldBranchSide(id,n):'';
-    const _sig=_nodeSignature(id, n, hasKids, roll, zd, _metricsKey)+'|k'+_kidCount+'|fs'+_foldSide;
+    const _sig=_nodeSignature(id, n, hasKids, roll, zd, _metricsKey)+'|k'+_kidCount+'|fs'+_foldSide+'|im'+_imgMode;
     const _old=_nodeEls.get(id);
     if(_old && _nodeSig.get(id)===_sig){
       // Unchanged: keep the element and its measured size. Position and the
@@ -1799,7 +1804,8 @@ function render(){
     // Reference/citation nodes get a distinct class
     if(n.ref) el.classList.add('ref-node');
     // Attached image renders as a thumbnail above the text (node goes column)
-    if(n.image){
+    // in 'inline' mode; the compact 'icon' mode draws a 20x20 badge instead.
+    if(n.image && _imgMode==='inline'){
       el.classList.add('has-image');
       const img=document.createElement('img');
       img.className='node-image'; img.src=n.image; img.alt=n.imageAlt||'attachment';
@@ -1825,6 +1831,10 @@ function render(){
       img.addEventListener('load',()=>{ remeasureNodeAndReflow(id); updateMinimap(); });
       el.appendChild(img);
     }
+    // The badge is idempotent and also removes one left on a reused element in
+    // inline mode (or with no image at all); a fixed 20x20 box never changes a
+    // node's measured size, and it stops its own mousedown/pointerdown.
+    if(typeof MSNodeImage !== 'undefined') MSNodeImage.decorate(el, n, {mode:_imgMode});
     // Marker badge - click to change, same interaction shape as the task
     // checkbox below it.
     if(n.marker){
@@ -2106,6 +2116,20 @@ function linkFaviconsEnabled(){
 function setLinkFavicons(on){
   try{ localStorage.setItem(LINK_FAVICONS_KEY, on?'1':'0'); }catch(e){}
   if(map) render();   // the flag is part of every node's signature, so this rebuilds them
+}
+// Node images show either as the full inline thumbnail or - the default - as a
+// compact 20x20 badge (public/node-image.js). Only the exact stored value
+// 'inline' opts into the big image, so a missing/blocked localStorage keeps the
+// compact default instead of growing every card.
+const IMAGE_DISPLAY_KEY = 'mindspark:image-display';
+function imageDisplayMode(){
+  try{ return localStorage.getItem(IMAGE_DISPLAY_KEY)==='inline' ? 'inline' : 'icon'; }
+  catch(e){ return 'icon'; }
+}
+function setImageDisplay(mode){
+  const m = mode==='inline' ? 'inline' : 'icon';
+  try{ localStorage.setItem(IMAGE_DISPLAY_KEY, m); }catch(e){}
+  if(map) render();   // the display mode is part of every node's signature too
 }
 function appendTextWithLinks(container, text){
   let last=0, m;
@@ -6023,6 +6047,14 @@ function attachImageToNode(id){
   inp.onchange=()=>{ const f=inp.files[0]; if(f) readImageFile(f,id); };
   inp.click();
 }
+// A stored image is a data:/blob:/http(s) URL, or the app server's relative
+// '/files/<name>' path. Export sinks (Word, the PNG painter) need something an
+// <img> or canvas can load; MSImageStore.resolve() joins the server path to the
+// app root (sub-path deployments included) and passes everything else through.
+function resolveImageSrc(src){
+  try{ if(window.MSImageStore && typeof MSImageStore.resolve==='function') return MSImageStore.resolve(src); }catch(e){}
+  return src;
+}
 // Whether any pixel of the drawn image is not fully opaque.
 function imageHasAlpha(ctx, w, h){
   try{
@@ -6058,7 +6090,7 @@ function readImageFile(file,id){
   const reader=new FileReader();
   reader.onload=()=>{
     const img=new Image();
-    img.onload=()=>{
+    img.onload=async()=>{
       // Down-scale to a sane max so the data-URL stays small (esp. for cloud/GitHub storage)
       if(map!==target || !map.nodes[id]){ toast('The map changed before the image finished loading - attach it again'); return; }
       const {w,h}=imageAttachSize(img.width,img.height);
@@ -6070,13 +6102,28 @@ function readImageFile(file,id){
       cx.drawImage(img,0,0,w,h);
       let data;
       try{ data=encodeImageAttachment(cv,cx,w,h); }catch(e){ data=reader.result; }
-      map.nodes[id].image=data;
+      // The app server owns /files/: store the encoded image there and keep only
+      // its short URL on the node, so the map JSON stays small. Cloud/static
+      // deployments have no upload endpoint and keep the data URL as before.
+      // The node is written only after that decision, so it can never be left
+      // holding a value halfway between the two.
+      let stored=data, bytes=data.length, uploadFailed=false;
+      if(window.MSImageStore && MSImageStore.available()){
+        try{
+          const blob=MSImageStore.blobFromDataUrl(data);
+          if(!blob) throw new Error('the encoded attachment could not be read back');
+          stored=await MSImageStore.upload(blob);
+          bytes=blob.size;
+        }catch(e){ uploadFailed=true; console.warn('Image upload failed; storing it inside the map instead', e); }
+      }
+      map.nodes[id].image=stored;
       // autoLayout(), not just render(): the node grows to fit the image, and
       // its neighbours' positions were computed for the old, smaller size -
       // without a re-tidy the enlarged node overlaps them.
       pushHistory(); render(); autoLayout();
-      const kb=Math.round(data.length/1024);
-      toast(`Image attached (~${kb} KB)`+(kb>500 && MODE==='cloud'?' - large images slow cloud sync':''));
+      const kb=Math.round(bytes/1024);
+      if(uploadFailed) toast(`Image attached (~${kb} KB - upload failed, stored inside the map)`);
+      else toast(`Image attached (~${kb} KB)`+(kb>500 && MODE==='cloud'?' - large images slow cloud sync':''));
     };
     img.onerror=()=>toast('Could not read image');
     img.src=reader.result;
@@ -8750,7 +8797,10 @@ function normalizeLoadedMap(m){
 // back to its default, a bad id is re-keyed with every reference rewritten.
 const SAFE_COLOR_RE = /^(#[0-9a-fA-F]{3,8}|(?:rgb|hsl)a?\([\d\s.,%\/deg-]{1,40}\)|[a-zA-Z]{3,24})$/;
 const SAFE_ID_RE = /^[\w.:-]{1,80}$/;
-const SAFE_IMAGE_RE = /^(https?:\/\/|data:image\/|blob:)/i;
+// Server uploads are stored as '/files/<name>' (optionally written without the
+// leading slash by an imported Markdown file); everything else keeps the same
+// three prefixes the app has always accepted.
+const SAFE_IMAGE_RE = /^(https?:\/\/|data:image\/|blob:|\/?files\/)/i;
 const NODE_ALIGNS = new Set(['left','center','right']);
 function safeColor(v){ return (typeof v === 'string' && SAFE_COLOR_RE.test(v.trim())) ? v.trim() : null; }
 // A quote is never needed in an image URL (it would be %22) but can end the
@@ -10625,12 +10675,15 @@ function buildMarkdown(startId, opts){
       if(n.align && n.align!=='center') s=`<div style="text-align:${n.align}">${s}</div>`;   // 'center' is the render-time default (see renderNodeText) - skip for brevity
       return s;
     };
-    // A non-http(s) image (pasted/uploaded - stored as a data: URI) has no Markdown image
-    // syntax that can hold it, so it round-trips as a literal <img> tag instead of silently
-    // living only in the meta comment; a plain http(s) image keeps using ![image](url).
+    // A data: image (pasted/uploaded into a map that lives in a browser or a forge) has no
+    // Markdown image syntax that can hold it, so it round-trips as a literal <img> tag instead
+    // of silently living only in the meta comment; an http(s) or /files/ image keeps using
+    // ![image](url).
     const imageLine = () => {
       if(!(rich && n.image)) return null;
-      if(/^https?:\/\//i.test(n.image)) return `![${n.imageAlt||'image'}](${n.image})`;
+      // http(s) and the server's /files/ path both fit Markdown's ![alt](src);
+      // only a data:/blob: URI (no Markdown form) becomes a literal <img> tag.
+      if(/^(https?:\/\/|\/?files\/)/i.test(n.image)) return `![${n.imageAlt||'image'}](${n.image})`;
       // %22 rather than &quot;: still the same URL, and it survives the parser's round trip.
       return `<img src="${String(n.image).replace(/"/g,'%22')}"${n.imageAlt ? ' alt="'+escapeHtml(n.imageAlt)+'"' : ''}>`;
     };
@@ -10998,7 +11051,7 @@ function buildDoc(){
   let body = `<h1>${escapeHtml(title)}</h1>`;
   // Root's image, if any
   const rootN = map.nodes[map.rootId];
-  if(rootN && rootN.image){ body += `<img src="${escapeHtml(rootN.image)}" alt="${escapeHtml(rootN.imageAlt||'attachment')}" style="max-width:320px;max-height:220px;display:block;margin-bottom:10px;border-radius:8px">`; }
+  if(rootN && rootN.image){ body += `<img src="${escapeHtml(resolveImageSrc(rootN.image))}" alt="${escapeHtml(rootN.imageAlt||'attachment')}" style="max-width:320px;max-height:220px;display:block;margin-bottom:10px;border-radius:8px">`; }
   // Add root's notes under the title
   const rn = rootN?.notes;
   if(rn){ body += `<p><em>${renderMathForExport(rn, 13, '#6a6258') ?? sanitizeInlineHTML(rn)}</em></p>`; }
@@ -11013,7 +11066,7 @@ function buildDoc(){
         ?? (INLINE_HTML_RE.test(n.text||'') ? sanitizeInlineHTML(n.text) : escapeHtml(n.text||'').replace(/\n/g,'<br>'));
       const taskMark = n.task ? (n.task==='done' ? '\u2611\uFE0F ' : n.task==='doing' ? '\u25D0 ' : '\u2610 ') : '';
       out += `<li>`;
-      if(n.image) out += `<img src="${escapeHtml(n.image)}" alt="${escapeHtml(n.imageAlt||'attachment')}" style="max-width:280px;max-height:200px;display:block;margin-bottom:4px;border-radius:6px"><br>`;
+      if(n.image) out += `<img src="${escapeHtml(resolveImageSrc(n.image))}" alt="${escapeHtml(n.imageAlt||'attachment')}" style="max-width:280px;max-height:200px;display:block;margin-bottom:4px;border-radius:6px"><br>`;
       out += `${taskMark}${n.task==='done'?`<span style="text-decoration:line-through;opacity:.65">${txt}</span>`:txt}`;
       if(n.notes){ out += `<br><em style="color:#666">${renderMathForExport(n.notes, 13, '#6a6258') ?? sanitizeInlineHTML(n.notes)}</em>`; }
       out += renderChildren(cid, depth+1);
@@ -11220,6 +11273,9 @@ async function exportPNG(opts){
   const zd = withChildIndex(zebraDepth);   // depth parity for the tint choice
   const mapStyle  = resolvedMapStyle(map);
   const mapLayout = map.layout || 'balanced';
+  // The same display mode the screen is using: 'icon' draws the small badge,
+  // 'inline' the full image. Resolved once so every node in one export agrees.
+  const _imgMode = imageDisplayMode();
 
   const hidden=hiddenSet(); const ids=Object.keys(map.nodes).filter(i=>!hidden.has(i));
   // Pre-load every node's image - ctx.drawImage() needs an actual loaded Image
@@ -11235,7 +11291,7 @@ async function exportPNG(opts){
     img.src=src;
   });
   const imgMap={};
-  await Promise.all(ids.filter(i=>map.nodes[i].image).map(async i=>{ imgMap[i]=await loadImg(map.nodes[i].image); }));
+  await Promise.all(ids.filter(i=>map.nodes[i].image).map(async i=>{ imgMap[i]=await loadImg(resolveImageSrc(map.nodes[i].image)); }));
   // Groot look background image - exact face as SVG (converted from PNG)
   let grootImg=null;
   if((document.documentElement.getAttribute('data-look')||'office')==='groot'){
@@ -12040,8 +12096,28 @@ async function exportPNG(opts){
     })();
     // Node image - drawn first, at the top, so text/checkbox center in the space below it
     let imgDrawH = 0;
+    // Compact icon display: the same 20x20 badge the screen shows, in the card's
+    // content box and vertically centred, with the text starting after it (the
+    // badge plus its 6px margin). Map coordinates, and the canvas is already
+    // ctx.scale()d, so this is 20x20 CSS px at the export scale, like the badge.
+    // The node was measured with the badge in its flex row, so the text area
+    // shrinks by the same width even if the image itself failed to load.
+    const iconW = (_imgMode==='icon' && map.nodes[i].image) ? 26 : 0;
     const img = imgMap[i];
-    if(img){
+    if(_imgMode==='icon'){
+      if(img){
+        const bs=20, bx=n.x+insetX, by=n.y+(h-bs)/2;
+        ctx.save();
+        roundRect(ctx, bx, by, bs, bs, 4);
+        ctx.clip();
+        ctx.drawImage(img, bx, by, bs, bs);
+        ctx.restore();
+        ctx.save();
+        roundRect(ctx, bx+0.5, by+0.5, bs-1, bs-1, 3.5);
+        ctx.strokeStyle=themeLine; ctx.lineWidth=1; ctx.stroke();
+        ctx.restore();
+      }
+    } else if(img){
       const contentW = w - insetX*2;
       imgDrawH = Math.min(280, contentW * (img.naturalHeight/img.naturalWidth || 1));
       const imgTop = (isRoot?14:10) * _padScale;
@@ -12077,8 +12153,8 @@ async function exportPNG(opts){
       ctx.fillStyle = n.highlight;
       ctx.fillRect(n.x+insetX-2, n.y+imgDrawH+4, w-insetX*2+4, h-imgDrawH-8);
     }
-    const baseX = n.x+insetX;
-    let textX = baseX, textMaxWidth = w-insetX*2;
+    const baseX = n.x+insetX+iconW;
+    let textX = baseX, textMaxWidth = w-insetX*2-iconW;
     // Marker badge - drawn before the task box so export order matches the DOM.
     if(n.marker){
       ctx.font='15px sans-serif'; ctx.textAlign='start'; ctx.textBaseline='middle';
@@ -16233,6 +16309,7 @@ const PREFS = [
   { key:'mindspark:zenPinned',         kind:'pref',      section:'Appearance', label:'Zen toolbar',       show:v=>v==='1' ? 'pinned' : 'auto-hide' },
   { key:'mindspark:tabs',              kind:'pref',      section:'Appearance', label:'Tabbed workspace',  show:v=>v==='1' ? 'on' : 'off' },
   { key:'mindspark:linkFavicons',      kind:'pref',      section:'Appearance', label:'Link favicons',     show:v=>v==='1' ? 'on' : 'off (default)' },
+  { key:'mindspark:image-display',     kind:'pref',      section:'Appearance', label:'Image display',     show:v=>v==='inline' ? 'Inline thumbnail' : 'Compact icon' },
   { key:'mindspark:prefs:folds',       kind:'pref',      section:'Appearance', label:'Preferences card folds', show:v=>{ try{ return Object.entries(JSON.parse(v)).map(([k,o])=>k+(o?' open':' closed')).join(', '); }catch(e){ return '(unreadable)'; } } },
   { key:'mindspark:sidebarContent',    kind:'pref',      section:'Appearance', label:'Sidebar content',  show:v=>{ if(v==='none') return 'off'; if(v==='quote') return 'Quote only'; if(v==='word') return 'Word only'; return 'Random (default)'; } },
   // Account - where maps are saved, and the credentials that get there
@@ -16601,6 +16678,7 @@ function showPreferences(){
     row(ap, 'Zen toolbar', check('Pinned (always visible in the Zen layout)', document.body.classList.contains('zen-pinned'), setZenPinned));
     row(ap, 'Tabbed workspace', check('On', tabsEnabled, setTabsEnabled));
     row(ap, 'Link favicons', check('Show (fetched from icons.duckduckgo.com, which learns each link\u2019s host)', linkFaviconsEnabled(), setLinkFavicons));
+    row(ap, 'Image display', select([{id:'icon',name:'Compact icon'}, {id:'inline',name:'Inline thumbnail'}], imageDisplayMode(), setImageDisplay));
     const sidebarContent=select([{id:'random',name:'Random (quote or word)'}, {id:'quote',name:'Quote only'}, {id:'word',name:'Word only'}, {id:'none',name:'Don\'t show'}], (()=>{ try{ return localStorage.getItem('mindspark:sidebarContent')||'random'; }catch(e){ return 'random'; } })(), v=>{ try{ localStorage.setItem('mindspark:sidebarContent',v); }catch(e){} render(); const wrap=$('#qotd'); if(v==='none'){ if(wrap) wrap.hidden=true; } else { if(wrap){ wrap.hidden=false; loadQotd(); } } });
     row(ap, 'Sidebar content', sidebarContent);
     // The nuclear option, last and unstyled as primary.

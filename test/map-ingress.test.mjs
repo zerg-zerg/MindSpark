@@ -55,9 +55,12 @@ describe('sanitizeMapData - what it leaves alone', () => {
   });
 
   test('image URLs the app stores are accepted', () => {
-    for (const u of ['https://x.y/a.png', 'http://x.y/a.jpg', 'data:image/png;base64,AAA', 'blob:https://x.y/uuid']) {
+    for (const u of ['https://x.y/a.png', 'http://x.y/a.jpg', 'data:image/png;base64,AAA', 'blob:https://x.y/uuid',
+                     '/files/' + 'a'.repeat(32) + '.png', 'files/x.png']) {
       assert.equal(safeImageUrl(u), u, u);
     }
+    // A server path is not a licence for a script URL or a filesystem path.
+    for (const u of ['javascript:alert(1)', '/etc/passwd']) assert.equal(safeImageUrl(u), null, u);
   });
 });
 
