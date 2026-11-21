@@ -41,17 +41,19 @@ function harness(opts = {}) {
   const ls = opts.ls || storage();
   const maps = opts.maps || [];
   const saved = [];
+  const removed = [];
   const toasts = [];
   const refreshes = { n: 0 };
   const Store = {
     list: async () => { if (opts.failList) throw opts.failList; return maps; },
     get: async id => maps.find(m => m.id === id) || null,
     save: async m => { if (opts.failSave) throw opts.failSave; saved.push(m); },
+    remove: async id => { removed.push(id); },
   };
   const fns = loadFns(
     ['loadFolderPrefs', 'saveFolderPrefs', 'folderNames', 'setMapFolder', 'renameFolder', 'deleteFolder'],
     { localStorage: ls, Store, toast: t => toasts.push(t), refreshList: () => { refreshes.n++; }, map: opts.map || null, READONLY: !!opts.readonly });
-  return { ...fns, ls, maps, saved, toasts, refreshes };
+  return { ...fns, ls, maps, saved, removed, toasts, refreshes };
 }
 
 describe('folder registry', () => {
@@ -284,6 +286,7 @@ describe('deleteFolder', () => {
     const h = harness({ maps: [a, b, c], ls: storage({ 'mindspark:folders': JSON.stringify({ order: ['A', 'Z'], collapsed: ['A'] }) }) });
     await h.deleteFolder('A');
     assert.equal(h.maps.length, 3, 'maps are never deleted');
+    assert.deepEqual(h.removed, [], 'deleteFolder must never call Store.remove');
     assert.ok(!('folder' in a) && !('folder' in b));
     assert.equal(c.folder, 'Z');
     assert.deepEqual(JSON.parse(h.ls.store.get('mindspark:folders')), { order: ['Z'], collapsed: [] });

@@ -1691,19 +1691,20 @@ body.ui-classic.tabs-on.md-ready .stage{grid-column:3;grid-row:2}
   .notes-popup button.primary:hover{background:var(--accent-deep)}
   .notes-popup .np-clear{margin-right:auto; color:var(--ink-soft); border-color:transparent; background:transparent}
   .notes-popup .np-clear:hover{color:var(--danger); background:var(--hover)}
-  /* Header helpers: Markdown source toggle and full-window expand, both shaped
-     like the close button so they cluster with it at the right end of the head. */
-  .notes-popup .np-head .np-md,
+  /* Full-window expand stays in the head, shaped like the close button so the
+     two cluster at its right end. The Markdown source toggle sits in the
+     toolbar below with the other note commands. */
   .notes-popup .np-head .np-expand{
     width:22px; height:22px; padding:0;
     border:none; background:transparent; color:var(--sticky-ink);
     font-size:13px; line-height:1; border-radius:5px; cursor:pointer;
     display:inline-flex; align-items:center; justify-content:center;
   }
-  .notes-popup .np-head .np-md{font-size:10px; font-weight:700; letter-spacing:.02em}
-  .notes-popup .np-head .np-md:hover,
   .notes-popup .np-head .np-expand:hover{background:color-mix(in srgb, var(--sticky-ink) 16%, transparent)}
-  .notes-popup .np-head .np-md.on{background:var(--sticky-ink); color:var(--sticky); border-color:var(--sticky-ink)}
+  /* The toolbar button is sized by the shared rule; MD only needs a tighter
+     label, and .on marks the source view as active. */
+  .notes-popup .np-toolbar .np-md{margin-left:auto; font-size:10px; font-weight:700; letter-spacing:.02em}
+  .notes-popup .np-toolbar .np-md.on{background:var(--sticky-ink); color:var(--sticky); border-color:var(--sticky-ink)}
   /* Markdown source view: the same slot as the editor, with the editor's padding,
      so the text does not jump when toggling. */
   .notes-popup .np-mdsrc{

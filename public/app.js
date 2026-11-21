@@ -8262,8 +8262,9 @@ async function renameFolder(oldName, newName){
   saveFolderPrefs(prefs);
   refreshList();
 }
-// Delete a folder WITHOUT deleting maps: every member is unfiled and the name
-// is forgotten by the registry. The maps keep everything else they are.
+// Delete a folder WITHOUT deleting maps: every member is unfiled (its `folder`
+// field cleared) and the name is forgotten by the registry. The maps keep
+// everything else they are, and Store.remove must never appear in this path.
 async function deleteFolder(name){
   if(READONLY) return;
   const n=(typeof name==='string' ? name : '').trim();
@@ -8303,7 +8304,6 @@ function showNotesEditor(nodeId){
   popup.innerHTML=`
     <div class="np-head">
       <span class="np-title">Notes</span>
-      <button class="np-md" title="Toggle Markdown source editing" aria-label="Toggle Markdown source editing">MD</button>
       <button class="np-expand" title="Expand to full window" aria-label="Expand to full window">⛶</button>
       <button class="np-x" title="Close" aria-label="Close">✕</button>
     </div>
@@ -8321,6 +8321,8 @@ function showNotesEditor(nodeId){
       <button data-c="createLink"  title="Insert link">🔗</button>
       <button data-c="unlink"      title="Remove link">⊘🔗</button>
       <button data-c="removeFormat" title="Clear formatting">⨯</button>
+      <div class="np-div"></div>
+      <button class="np-md" title="Toggle Markdown source editing" aria-label="Toggle Markdown source editing">MD</button>
     </div>
     <div class="np-editor" contenteditable="true" data-placeholder="Type your notes - formatting via the toolbar, $x^2$ or $$...$$ for math."></div>
     <textarea class="np-mdsrc" placeholder="Markdown source - **bold**, # headings, - lists, $x^2$ math" style="display:none"></textarea>
@@ -8408,7 +8410,8 @@ function showNotesEditor(nodeId){
   const range=document.createRange(); range.selectNodeContents(editor); range.collapse(false);
   const s=getSelection(); s.removeAllRanges(); s.addRange(range);
 
-  popup.querySelectorAll('.np-toolbar button').forEach(btn=>{
+  // Formatting commands only: the MD toggle in the same bar has its own handler.
+  popup.querySelectorAll('.np-toolbar button:not(.np-md)').forEach(btn=>{
     btn.addEventListener('mousedown',e=>e.preventDefault());  // keep selection
     btn.addEventListener('click',e=>{
       e.stopPropagation();
@@ -8446,12 +8449,17 @@ function showNotesEditor(nodeId){
   // editor is hidden. Toggling back runs the same render path a fresh open
   // does, so $...$ math comes back as live spans.
   let mdMode=false;
+  // In source mode only the MD toggle stays in the toolbar: the formatting
+  // commands do nothing to a plain textarea. Hiding just those (rather than the
+  // whole toolbar) keeps the way back where the user left it.
+  const npFmtEls=Array.from(popup.querySelectorAll('.np-toolbar > *')).filter(el=>!el.classList.contains('np-md'));
+  const npFmtShow=on=>{ npFmtEls.forEach(el=>{ el.style.display=on?'':'none'; }); };
   const npMdShow=on=>{
     mdMode=!!on;
     if(mdMode){
       ta.value=notesHtmlToMd(npSerialize(editor));
       editor.style.display='none';
-      popup.querySelector('.np-toolbar').style.display='none';
+      npFmtShow(false);
       ta.style.display='';
       mdBtn.classList.add('on');
       ta.focus();
@@ -8459,7 +8467,7 @@ function showNotesEditor(nodeId){
       editor.innerHTML=sanitizeNotes(notesMdToHtml(ta.value));
       npRenderAll(editor);
       ta.style.display='none';
-      popup.querySelector('.np-toolbar').style.display='';
+      npFmtShow(true);
       editor.style.display='';
       mdBtn.classList.remove('on');
       editor.focus();

@@ -26,7 +26,7 @@
  *     be actively harmful, not merely unhelpful.
  *   - Only GET is handled. Anything else falls through to the network.
  */
-const CACHE = 'mindspark-shell-v3';   // bumped: v2 had stale CSP, v1 could pin clients to a stale app.js
+const CACHE = 'mindspark-shell-v4';   // bumped: v3 shipped the old note popup markup; v2 had stale CSP, v1 could pin clients to a stale app.js
 // The app's own path prefix ('/' at the root, '/MindSpark/' on GitHub Pages,
 // '/mindspark/' behind a reverse proxy). The API and health probe live under
 // it, and the app resolves them the same way (appUrl() in app.js).

@@ -1,9 +1,10 @@
-// The notes editor got two header buttons. MD toggles a Markdown source view
-// inside the popup: the rich note is converted out with notesHtmlToMd() and
-// back with notesMdToHtml() (mdToHtml behind the notes sanitizer), so what is
-// saved still goes through npSerialize. The expand button takes the popup full
-// window via the .np-max class. This file exercises the conversions as a round
-// trip and pins the popup wiring the same way notes-math-inplace does.
+// The notes editor has an MD toggle in its toolbar and an expand button in the
+// header. MD swaps in a Markdown source view inside the popup: the rich note is
+// converted out with notesHtmlToMd() and back with notesMdToHtml() (mdToHtml
+// behind the notes sanitizer), so what is saved still goes through npSerialize.
+// The expand button takes the popup full window via the .np-max class. This
+// file exercises the conversions as a round trip and pins the popup wiring the
+// same way notes-math-inplace does.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -170,12 +171,23 @@ describe('notesMdToHtml: Markdown becomes sanitized rich notes', () => {
 });
 
 describe('the popup wiring', () => {
-  test('head order is title, MD, expand, close', () => {
+  test('head order is title, expand, close; the MD toggle moved to the toolbar', () => {
     const head = editor.match(/<div class="np-head">[\s\S]*?<\/div>/)[0];
     const at = s => head.indexOf(s);
-    assert.ok(at('np-title') < at('np-md') && at('np-md') < at('np-expand') && at('np-expand') < at('np-x'));
-    assert.match(head, /<button class="np-md" title="Toggle Markdown source editing" aria-label="Toggle Markdown source editing">MD<\/button>/);
+    assert.ok(at('np-title') < at('np-expand') && at('np-expand') < at('np-x'));
+    assert.doesNotMatch(head, /np-md/, 'the MD toggle is no longer in the header');
     assert.match(head, /<button class="np-expand" title="Expand to full window" aria-label="Expand to full window">⛶<\/button>/);
+    const toolbar = editor.match(/<div class="np-toolbar">([\s\S]*?)<div class="np-editor"/)[1];
+    assert.match(toolbar, /<button class="np-md" title="Toggle Markdown source editing" aria-label="Toggle Markdown source editing">MD<\/button>/);
+    assert.ok(toolbar.indexOf('removeFormat') < toolbar.indexOf('np-md'), 'MD sits after the formatting commands');
+  });
+
+  test('source mode keeps the MD toggle reachable by hiding only the formatting buttons', () => {
+    assert.match(editor, /const npFmtEls=Array\.from\(popup\.querySelectorAll\('\.np-toolbar > \*'\)\)\.filter\(el=>!el\.classList\.contains\('np-md'\)\);/);
+    const mdShow = editor.slice(editor.indexOf('const npMdShow=on=>{'), editor.indexOf('if(mdBtn) mdBtn.addEventListener'));
+    assert.doesNotMatch(mdShow, /\.np-toolbar'\)\.style\.display/, 'the whole toolbar is never hidden in source mode');
+    assert.match(mdShow, /npFmtShow\(false\);/);
+    assert.match(mdShow, /npFmtShow\(true\);/);
   });
 
   test('the source textarea shares the editor slot and starts hidden', () => {
@@ -246,9 +258,10 @@ describe('styles', () => {
     assert.match(CSS, /\.notes-popup \.np-mdsrc\{[^}]*font-family:ui-monospace/);
   });
 
-  test('.np-md and .np-expand match .np-x; .on is the sticky-palette accent', () => {
-    assert.match(CSS, /\.notes-popup \.np-head \.np-md,\s*\n\s*\.notes-popup \.np-head \.np-expand\{[^}]*width:22px; height:22px;/);
-    assert.match(CSS, /\.notes-popup \.np-head \.np-md:hover,\s*\n\s*\.notes-popup \.np-head \.np-expand:hover\{background:color-mix\(in srgb, var\(--sticky-ink\) 16%, transparent\)\}/);
-    assert.match(CSS, /\.notes-popup \.np-head \.np-md\.on\{background:var\(--sticky-ink\); color:var\(--sticky\); border-color:var\(--sticky-ink\)\}/);
+  test('.np-expand matches .np-x; the toolbar MD toggle keeps the .on accent', () => {
+    assert.match(CSS, /\.notes-popup \.np-head \.np-expand\{[^}]*width:22px; height:22px;/);
+    assert.match(CSS, /\.notes-popup \.np-head \.np-expand:hover\{background:color-mix\(in srgb, var\(--sticky-ink\) 16%, transparent\)\}/);
+    assert.match(CSS, /\.notes-popup \.np-toolbar \.np-md\{margin-left:auto; font-size:10px; font-weight:700; letter-spacing:\.02em\}/);
+    assert.match(CSS, /\.notes-popup \.np-toolbar \.np-md\.on\{background:var\(--sticky-ink\); color:var\(--sticky\); border-color:var\(--sticky-ink\)\}/);
   });
 });
