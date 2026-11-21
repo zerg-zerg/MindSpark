@@ -142,6 +142,7 @@ const MAP_TABLES = `
     id       TEXT NOT NULL,
     title    TEXT NOT NULL DEFAULT 'Untitled map',
     color    TEXT,
+    folder   TEXT,
     data     TEXT NOT NULL,
     updated  INTEGER NOT NULL,
     PRIMARY KEY (owner_id, id)
@@ -178,6 +179,24 @@ function migrateLegacyMaps(adminId) {
 }
 migrateLegacyMaps(ADMIN_ID);
 db.exec(MAP_TABLES);
+// The folder column arrived after the first release: a database written before
+// it existed gets the column added here, and any map JSON that already carried
+// a folder (a newer client once saved against an older server) is backfilled
+// into it. Parsed in JS on purpose - no SQLite JSON1 functions.
+function ensureFolderColumn() {
+  let cols = [];
+  try { cols = db.prepare('PRAGMA table_info(maps)').all().map(c => c.name); } catch (e) { cols = []; }
+  if (!cols.length || cols.includes('folder')) return;   // fresh, or already migrated
+  db.exec('ALTER TABLE maps ADD COLUMN folder TEXT');
+  const backfill = db.prepare('UPDATE maps SET folder = ? WHERE owner_id = ? AND id = ?');
+  let n = 0;
+  for (const row of db.prepare('SELECT id, owner_id, data FROM maps').all()) {
+    let m; try { m = JSON.parse(row.data); } catch (e) { continue; }
+    if (m && typeof m.folder === 'string' && m.folder.trim()) { backfill.run(m.folder, row.owner_id, row.id); n++; }
+  }
+  console.log(`  Added the maps.folder column${n ? ` and backfilled it on ${n} map(s)` : ''}.`);
+}
+ensureFolderColumn();
 // Created after any migration so the name is free: renaming a table keeps its
 // old index, and an IF NOT EXISTS index of the same name would then be a no-op.
 db.exec('CREATE INDEX IF NOT EXISTS idx_versions_id ON map_versions (owner_id, id, ts DESC)');
@@ -208,11 +227,11 @@ function publicMapPayload(dataStr) {
 }
 
 const Q = {
-  list:   db.prepare('SELECT id, title, color, updated FROM maps WHERE owner_id = ? ORDER BY updated DESC'),
+  list:   db.prepare('SELECT id, title, color, folder, updated FROM maps WHERE owner_id = ? ORDER BY updated DESC'),
   get:    db.prepare('SELECT data FROM maps WHERE owner_id = ? AND id = ?'),
   ownsMap: db.prepare('SELECT 1 AS ok FROM maps WHERE owner_id = ? AND id = ?'),
-  insert: db.prepare('INSERT INTO maps (owner_id,id,title,color,data,updated) VALUES (?,?,?,?,?,?)'),
-  update: db.prepare('UPDATE maps SET title=?, color=?, data=?, updated=? WHERE owner_id = ? AND id = ?'),
+  insert: db.prepare('INSERT INTO maps (owner_id,id,title,color,folder,data,updated) VALUES (?,?,?,?,?,?,?)'),
+  update: db.prepare('UPDATE maps SET title=?, color=?, folder=?, data=?, updated=? WHERE owner_id = ? AND id = ?'),
   del:    db.prepare('DELETE FROM maps WHERE owner_id = ? AND id = ?'),
   // version history
   vLatest: db.prepare('SELECT ts, data FROM map_versions WHERE owner_id = ? AND id = ? ORDER BY ts DESC LIMIT 1'),
@@ -269,8 +288,8 @@ function requireAdmin(req, res) {
 const upsert = (m, ownerId) => {
   const data = JSON.stringify(m);
   const updated = m.updated || Date.now();
-  const r = Q.update.run(m.title || 'Untitled map', m.color || null, data, updated, ownerId, m.id);
-  if (r.changes === 0) Q.insert.run(ownerId, m.id, m.title || 'Untitled map', m.color || null, data, updated);
+  const r = Q.update.run(m.title || 'Untitled map', m.color || null, m.folder || null, data, updated, ownerId, m.id);
+  if (r.changes === 0) Q.insert.run(ownerId, m.id, m.title || 'Untitled map', m.color || null, m.folder || null, data, updated);
   // Snapshot a version only when the content actually changed (skips no-op autosaves),
   // then prune to the most recent 50 per map. Saves within a minute of the newest
   // version refine that version instead of adding one: autosave runs after every

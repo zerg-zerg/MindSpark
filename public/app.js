@@ -883,7 +883,7 @@ const CloudStore = {
         if(!r.ok) continue;
         const data=await r.json(); this.shas[id]=this.forge.readVersion(data);
         const m=JSON.parse(this._decode(data.content));
-        const e={id:m.id||id, title:m.title||'(untitled)', color:m.color, updated:m.updated||0}; if(m.pinned) e.pinned=true; out.push(e);
+        const e={id:m.id||id, title:m.title||'(untitled)', color:m.color, updated:m.updated||0}; if(m.pinned) e.pinned=true; if(m.folder) e.folder=m.folder; out.push(e);
       }catch(e){}
     }
     return out;
@@ -1026,18 +1026,19 @@ const CloudStore = {
     try{ localStorage.setItem('mindspark:backup:'+map.id, json); }catch(e){}
     const entry={id:map.id, title:map.title, color:map.color, updated:map.updated};
     if(map.pinned) entry.pinned=true;
+    if(map.folder) entry.folder=map.folder;
     const i=this.index.findIndex(m=>m.id===map.id);
     const prev=i>=0 ? this.index[i] : null;
     if(i>=0) this.index[i]=entry; else this.index.unshift(entry);
     this.index.sort((a,b)=>b.updated-a.updated);
-    // The index lists title, colour, pin and a recency stamp. It is written when
-    // one of the first three changed, or when the stamp it holds for this map is
+    // The index lists title, colour, pin, folder and a recency stamp. It is written when
+    // one of the first four changed, or when the stamp it holds for this map is
     // older than INDEX_STAMP_MS - not on every autosave, which cost a read and a
     // second commit each time (GitHub: 3 requests and 2 commits per save against
     // a 5000-requests-an-hour budget, and two commits of history per keystroke).
     this._idxStamp=this._idxStamp||{};
     const written=this._idxStamp[map.id];
-    const indexDue = !prev || prev.title!==entry.title || prev.color!==entry.color || !!prev.pinned!==!!entry.pinned
+    const indexDue = !prev || prev.title!==entry.title || prev.color!==entry.color || !!prev.pinned!==!!entry.pinned || prev.folder!==entry.folder
       || !(written>0) || entry.updated-written > INDEX_STAMP_MS;
     const path=`maps/${map.id}.json`;
     // The map and the index land together - one commit where the forge allows
@@ -7975,7 +7976,7 @@ function positionRowPop(pop, btn){
   const rb = btn.getBoundingClientRect();
   const pr = pop.getBoundingClientRect();
   const _z=_uiZ();
-  const row = btn.closest('.map-item') || btn.parentElement;
+  const row = btn.closest('.map-item,.folder-row') || btn.parentElement;
   const rowRect = row.getBoundingClientRect();
   let left = rowRect.right - pr.width - 4;
   let top = rb.bottom + 2;
@@ -8022,6 +8023,57 @@ function openRowMenu(btn, m){
     window.addEventListener('blur', closeRowMenu);
   },0);
 }
+
+// Folder header menu: rename or delete the FOLDER itself - never the maps
+// filed inside it (deleting a folder unfiles its maps to the top level).
+// Same one-portal-at-a-time lifecycle as openRowMenu: shared closeRowMenu()
+// state, capture-phase outside-mousedown, scroll and blur dismissal.
+function openFolderMenu(btn, name){
+  if(_rowPop && _rowPop._for==='folder:'+name){ closeRowMenu(); return; }   // toggle off
+  if(typeof closeAllMenus==='function') closeAllMenus();
+  closeRowMenu();
+  const pop=document.createElement('div'); pop.className='row-pop'; pop._for='folder:'+name;
+  pop.innerHTML='<button data-a="rename"><span class="rp-ic">\u270E</span>Rename</button>'+
+                '<button data-a="del" class="danger"><span class="rp-ic">\uD83D\uDDD1</span>Delete folder</button>';
+  // Portal to body with fixed positioning - escapes overflow clipping of .side-scroll
+  // (like Notion/VS Code context menus) and stays above .side-foot.
+  pop.style.visibility='hidden'; pop.style.left='-9999px'; pop.style.top='-9999px';
+  document.body.appendChild(pop);
+  positionRowPop(pop, btn);
+  pop.querySelector('[data-a="rename"]').onclick=async ev=>{ ev.stopPropagation(); closeRowMenu();
+    const n=prompt('Rename folder', name);
+    if(n && n.trim() && n.trim()!==name) await renameFolder(name, n.trim());
+  };
+  pop.querySelector('[data-a="del"]').onclick=async ev=>{ ev.stopPropagation(); closeRowMenu();
+    if(!confirm('Delete folder "'+name+'"? Maps inside are kept and moved to the top level.')) return;
+    await deleteFolder(name);
+  };
+  _rowPop=pop;
+  _rowPopOut=(e)=>{ if(_rowPop && (!e || e.type!=='mousedown' || !_rowPop.contains(e.target))) closeRowMenu(); };
+  setTimeout(()=>{
+    document.addEventListener('mousedown', _rowPopOut, true);
+    window.addEventListener('scroll', closeRowMenu, true);
+    window.addEventListener('blur', closeRowMenu);
+  },0);
+}
+
+// Group the index the sidebar renders: unfiled maps first (the plain list the
+// app has always shown), then one group per folder name in registry order.
+// Pure - it only reads the index and the folder registry - so the tests can
+// pin it without a DOM.
+let _listIdx=[];   // the index refreshList last rendered; the "new folder" button checks its names
+function folderGroups(idx){
+  const cmp=(a,b)=> (b.pinned?1:0)-(a.pinned?1:0) || (b.updated||0)-(a.updated||0);
+  const groups=[{name:null, items:[]}];
+  const byName=new Map();
+  for(const name of folderNames(idx)){ const g={name, items:[]}; groups.push(g); byName.set(name, g); }
+  for(const m of (idx||[])){
+    const g=(m && m.folder && byName.get(m.folder)) || groups[0];
+    g.items.push(m);
+  }
+  groups.forEach(g=>g.items.sort(cmp));
+  return groups;
+}
 async function refreshList(){
   let idx=[];
   try{ idx=await Store.list(); }catch(e){ idx=[]; }
@@ -8029,22 +8081,52 @@ async function refreshList(){
   // (don't wait for the debounced save to hit the database). Shared maps (_cloudView)
   // are NOT owned - they belong in "Shared with me", never in "Your maps".
   if(map && !map._cloudView){
-    const local={id:map.id, title:map.title, color:map.color, updated:map.updated||Date.now(), pinned:map.pinned||undefined};
+    const local={id:map.id, title:map.title, color:map.color, updated:map.updated||Date.now(), pinned:map.pinned||undefined, folder:map.folder||undefined};
     const at=idx.findIndex(m=>m.id===map.id);
     if(at>=0) idx[at]={...idx[at], ...local};
     else idx.unshift(local);
   }
   // Pinned maps first, then most-recently-updated.
   idx.sort((a,b)=> (b.pinned?1:0)-(a.pinned?1:0) || (b.updated||0)-(a.updated||0));
+  _listIdx=idx;
   const list=$('#mapList'); list.innerHTML='';
-  (idx||[]).forEach(m=>{
+  // One row builder for every map this pane shows - the template is byte
+  // identical everywhere (the escaped colour in the inline style is the
+  // pinned XSS guard); folder members additionally get the sub indent class.
+  // The id rides on dataset (a plain property, no markup to escape) for the
+  // drag channel below.
+  const mkRow=(m, sub)=>{
     const el=document.createElement('div');
-    el.className='map-item'+(map&&m.id===map.id?' active':'')+(m.pinned?' pinned':'');
+    el.className='map-item'+(sub?' sub':'')+(map&&m.id===map.id?' active':'')+(m.pinned?' pinned':'');
     el.innerHTML=`<span class="dot" style="background:${escapeHtml(m.color||'#e0613a')}"></span><span class="nm">${escapeHtml(m.title||'Untitled')}</span><button class="row-menu" title="More" aria-haspopup="true" aria-label="More actions">\u22ee</button>`;
+    if(!READONLY) el.draggable=true;
     el.style.cursor='pointer';
+    el.dataset.id=m.id;
     el.onclick=()=>{ if(!map || map.id!==m.id) loadMap(m.id); };
     el.querySelector('.row-menu').onclick=ev=>{ ev.stopPropagation(); openRowMenu(ev.currentTarget, m); };
-    list.appendChild(el);
+    return el;
+  };
+  folderGroups(idx).forEach(g=>{
+    // The unfiled group renders exactly like the list always did.
+    if(g.name===null){ g.items.forEach(m=>list.appendChild(mkRow(m, false))); return; }
+    // A folder header is a row, not a section label: clicking it collapses
+    // and expands its members, and it is itself the drop target for filing.
+    const collapsed=loadFolderPrefs().collapsed.includes(g.name);
+    const head=document.createElement('div');
+    head.className='folder-row';
+    head.innerHTML=`<span class="f-chev">${collapsed?'\u25b6':'\u25be'}</span><span class="f-name">${escapeHtml(g.name)}</span><span class="f-count">${g.items.length}</span><button class="row-menu f-menu" title="Folder menu" aria-haspopup="true" aria-label="Folder actions">\u22ee</button>`;
+    head.dataset.folder=g.name;
+    head.onclick=()=>{
+      const prefs=loadFolderPrefs();
+      const at=prefs.collapsed.indexOf(g.name);
+      if(at>=0) prefs.collapsed.splice(at,1); else prefs.collapsed.push(g.name);
+      saveFolderPrefs(prefs);
+      refreshList();
+    };
+    head.querySelector('.f-menu').onclick=ev=>{ ev.stopPropagation(); openFolderMenu(ev.currentTarget, g.name); };
+    list.appendChild(head);
+    // A collapsed folder shows only its header; an empty one still shows it.
+    if(!collapsed) g.items.forEach(m=>list.appendChild(mkRow(m, true)));
   });
   // Shared maps: one list combining maps you've shared OUT (you're the owner) and maps
   // shared WITH you (you're a guest), deduped by room. Opening connects to the LIVE copy.
@@ -8092,6 +8174,124 @@ async function togglePin(id){
   toast(now ? 'Pinned to top' : 'Unpinned');
 }
 
+// ---- Sidebar folders (data layer) ------------------------------------------
+// A map is filed by a plain name on the map itself (`map.folder`); absent or
+// empty means unfiled. The registry below holds only folder NAMES: their
+// display order (including empty folders) and which are collapsed. Membership
+// always lives on the maps, so it travels with every save, export and version;
+// the registry is the UI's memory between sessions.
+function loadFolderPrefs(){
+  const st={order:[],collapsed:[]};
+  try{
+    const v=JSON.parse(localStorage.getItem('mindspark:folders')||'{}');
+    const clean=a=>Array.isArray(a) ? a.filter(n=>typeof n==='string' && n.trim()).filter((n,i,a)=>a.indexOf(n)===i) : [];
+    st.order=clean(v.order);
+    st.collapsed=clean(v.collapsed);
+  }
+  catch(e){ console.warn('folder registry unreadable; starting fresh:', e); }
+  return st;
+}
+function saveFolderPrefs(st){
+  try{ localStorage.setItem('mindspark:folders', JSON.stringify(st)); }
+  catch(e){ console.warn('could not save the folder registry:', e); }
+}
+// The folder names to show, in order: every registered name first (so an empty
+// folder survives), then any map filed under a name the registry never heard
+// of, deduped, in list order.
+function folderNames(idx){
+  const prefs=loadFolderPrefs();
+  const out=[]; const seen=new Set();
+  const add=n=>{ if(typeof n==='string' && n.trim() && !seen.has(n)){ seen.add(n); out.push(n); } };
+  for(const n of prefs.order) add(n);
+  for(const e of (idx||[])) add(e && e.folder);
+  return out;
+}
+// File a map into a folder, or unfile it (empty or null). The open map is
+// edited in place and saved exactly like togglePin saves; a closed one is
+// fetched, edited and saved. Filing a map where it already is saves nothing.
+async function setMapFolder(id, folder){
+  if(READONLY) return;
+  const name=(typeof folder==='string' && folder.trim()) ? folder.trim() : null;
+  const target = (map && map.id===id) ? map : await Store.get(id);
+  if(!target) return;
+  if((target.folder||null)===name) return;   // already filed there: no save, no updated bump
+  if(name) target.folder=name; else delete target.folder;
+  try{ await Store.save(target); }
+  catch(e){ toast('Could not move the map: '+((e && e.message) || e)); return; }
+  refreshList();
+}
+// Rename a folder: every member map is re-filed (the open one straight from
+// memory, like togglePin), and the registry entry moves in place, merging into
+// an entry the new name may already have. One map that cannot be saved must
+// not stop the rest; what did not land is said, not implied away.
+async function renameFolder(oldName, newName){
+  if(READONLY) return;
+  const from=(typeof oldName==='string' ? oldName : '').trim();
+  const to=(typeof newName==='string' ? newName : '').trim();
+  if(!from || !to || from===to) return;
+  let idx;
+  try{ idx=await Store.list(); }
+  catch(e){ console.warn('folder rename could not list maps:', e); toast('Could not rename the folder: '+((e && e.message) || e)); return; }
+  const prefs=loadFolderPrefs();
+  let at=prefs.order.indexOf(from);
+  if(at>=0){
+    const dup=prefs.order.indexOf(to);        // the new name may exist already: one entry survives
+    if(dup>=0 && dup!==at){
+      prefs.order.splice(dup,1);
+      if(dup<at) at--;
+    }
+    prefs.order[at]=to;
+  }
+  const wasCollapsed=prefs.collapsed.includes(from) || prefs.collapsed.includes(to);
+  prefs.collapsed=prefs.collapsed.filter(n=>n!==from && n!==to);
+  if(wasCollapsed) prefs.collapsed.push(to);
+  let failed=0;
+  for(const entry of (idx||[])){
+    if(!entry || entry.folder!==from) continue;
+    try{
+      if(map && map.id===entry.id){ map.folder=to; await Store.save(map); }
+      else{
+        const m=await Store.get(entry.id);
+        if(!m) continue;
+        m.folder=to;
+        await Store.save(m);
+      }
+    }catch(e){ failed++; }
+  }
+  if(failed) toast('Folder renamed, but '+failed+' map(s) could not be updated');
+  saveFolderPrefs(prefs);
+  refreshList();
+}
+// Delete a folder WITHOUT deleting maps: every member is unfiled and the name
+// is forgotten by the registry. The maps keep everything else they are.
+async function deleteFolder(name){
+  if(READONLY) return;
+  const n=(typeof name==='string' ? name : '').trim();
+  if(!n) return;
+  let idx;
+  try{ idx=await Store.list(); }
+  catch(e){ console.warn('folder delete could not list maps:', e); toast('Could not delete the folder: '+((e && e.message) || e)); return; }
+  let failed=0;
+  for(const entry of (idx||[])){
+    if(!entry || entry.folder!==n) continue;
+    try{
+      if(map && map.id===entry.id){ delete map.folder; await Store.save(map); }
+      else{
+        const m=await Store.get(entry.id);
+        if(!m) continue;
+        delete m.folder;
+        await Store.save(m);
+      }
+    }catch(e){ failed++; }
+  }
+  if(failed) toast('Folder deleted, but '+failed+' map(s) could not be updated');
+  const prefs=loadFolderPrefs();
+  prefs.order=prefs.order.filter(x=>x!==n);
+  prefs.collapsed=prefs.collapsed.filter(x=>x!==n);
+  saveFolderPrefs(prefs);
+  refreshList();
+}
+
 /* ---------- Rich-text Notes editor popup ---------- */
 function showNotesEditor(nodeId){
   document.querySelectorAll('.notes-popup').forEach(p=>p.remove());
@@ -8103,6 +8303,8 @@ function showNotesEditor(nodeId){
   popup.innerHTML=`
     <div class="np-head">
       <span class="np-title">Notes</span>
+      <button class="np-md" title="Toggle Markdown source editing" aria-label="Toggle Markdown source editing">MD</button>
+      <button class="np-expand" title="Expand to full window" aria-label="Expand to full window">⛶</button>
       <button class="np-x" title="Close" aria-label="Close">✕</button>
     </div>
     <div class="np-toolbar">
@@ -8121,6 +8323,7 @@ function showNotesEditor(nodeId){
       <button data-c="removeFormat" title="Clear formatting">⨯</button>
     </div>
     <div class="np-editor" contenteditable="true" data-placeholder="Type your notes - formatting via the toolbar, $x^2$ or $$...$$ for math."></div>
+    <textarea class="np-mdsrc" placeholder="Markdown source - **bold**, # headings, - lists, $x^2$ math" style="display:none"></textarea>
     <div class="np-actions">
       ${has?'<button class="np-clear">Remove</button>':''}
       <button class="np-cancel">Cancel</button>
@@ -8138,6 +8341,9 @@ function showNotesEditor(nodeId){
   }catch(e){}
   document.body.appendChild(popup);
   const editor=popup.querySelector('.np-editor');
+  const ta=popup.querySelector('.np-mdsrc');   // Markdown source mode swaps this in for the editor
+  const mdBtn=popup.querySelector('.np-md');
+  const exBtn=popup.querySelector('.np-expand');
   editor.innerHTML = sanitizeNotes(n.notes||'');   // safe: inert-parsed, whitelisted
   npRenderAll(editor);                              // saved $...$ shows rendered from the start
   // Place the popup beside its node (not centred over the stage): just to the
@@ -8179,6 +8385,7 @@ function showNotesEditor(nodeId){
     popup.querySelector('.np-toolbar').style.display='none';
     popup.querySelectorAll('.np-save,.np-clear').forEach(b=>b.remove());
     const cb=popup.querySelector('.np-cancel'); if(cb) cb.textContent='Close';
+    const mb=popup.querySelector('.np-md'); if(mb) mb.style.display='none';   // no Markdown source editing in a read-only view
   }
   // Math renders in place as it is typed (see npRenderAtCaret). A formula the
   // user opened for editing (click, or Backspace onto it) is the one text node
@@ -8218,7 +8425,11 @@ function showNotesEditor(nodeId){
   const close=()=>{ document.removeEventListener('selectionchange', onSel); popup.remove(); };
   const save=()=>{
     // Stored as $ source (rendered formulas turned back), then the robust
-    // sanitize (inert parse + tag/attr whitelist).
+    // sanitize (inert parse + tag/attr whitelist). While Markdown source mode
+    // is on, the textarea is the active source - the hidden editor is stale
+    // until the toggle back - so commit it into the editor first; the serialize
+    // below then reads exactly what was on screen.
+    if(mdMode){ editor.innerHTML=sanitizeNotes(notesMdToHtml(ta.value)); npRenderAll(editor); }
     const html=npSerialize(editor);
     const plain=html.replace(/<[^>]*>/g,'').trim();
     if(plain) map.nodes[nodeId].notes=html; else delete map.nodes[nodeId].notes;
@@ -8231,12 +8442,55 @@ function showNotesEditor(nodeId){
   });
   // The header × is the third way out, alongside Cancel/Close and Escape.
   popup.querySelector('.np-x')?.addEventListener('click',e=>{ e.stopPropagation(); close(); });
+  // Markdown source mode: the textarea holds the note as Markdown and the rich
+  // editor is hidden. Toggling back runs the same render path a fresh open
+  // does, so $...$ math comes back as live spans.
+  let mdMode=false;
+  const npMdShow=on=>{
+    mdMode=!!on;
+    if(mdMode){
+      ta.value=notesHtmlToMd(npSerialize(editor));
+      editor.style.display='none';
+      popup.querySelector('.np-toolbar').style.display='none';
+      ta.style.display='';
+      mdBtn.classList.add('on');
+      ta.focus();
+    }else{
+      editor.innerHTML=sanitizeNotes(notesMdToHtml(ta.value));
+      npRenderAll(editor);
+      ta.style.display='none';
+      popup.querySelector('.np-toolbar').style.display='';
+      editor.style.display='';
+      mdBtn.classList.remove('on');
+      editor.focus();
+    }
+  };
+  if(mdBtn) mdBtn.addEventListener('click',e=>{ e.stopPropagation(); if(!_ro) npMdShow(!mdMode); });
+  // The textarea has no contenteditable handlers of its own: Escape leaves
+  // source mode (a second Escape then closes via the editor path above), and
+  // Ctrl/Cmd+Enter saves through the same save() as the button.
+  ta.addEventListener('keydown',e=>{
+    e.stopPropagation();
+    if(isComposingKey(e)) return;
+    if(e.key==='Escape'){ e.preventDefault(); npMdShow(false); return; }
+    if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); save(); }
+  });
+  // Expand to the whole window: a pure class whose !important rules beat the
+  // inline left/top/width/height the popup is positioned and resized by. Not
+  // persisted, and the header drag is inert while it is on.
+  const npMaxSet=on=>{
+    popup.classList.toggle('np-max',!!on);
+    const t=on?'Restore size':'Expand to full window';
+    if(exBtn){ exBtn.title=t; exBtn.setAttribute('aria-label',t); }
+  };
+  if(exBtn) exBtn.addEventListener('click',e=>{ e.stopPropagation(); npMaxSet(!popup.classList.contains('np-max')); });
   // Drag by the header, resize by the corner grip. Both track the pointer on
   // document so the gesture survives leaving the popup, and both divide the
   // raw pointer delta by _uiZ() so they stay correct at any display size.
   const head=popup.querySelector('.np-head');
   if(head) head.addEventListener('mousedown',e=>{
     if(e.target.closest('.np-x')) return;
+    if(popup.classList.contains('np-max')) return;   // maximized: the header drag is inert
     e.preventDefault();
     const dz=_uiZ(), sx=e.clientX, sy=e.clientY;
     const sl=parseFloat(popup.style.left)||0, st=parseFloat(popup.style.top)||0;
@@ -8274,7 +8528,12 @@ function showNotesEditor(nodeId){
   editor.addEventListener('keydown',e=>{
     e.stopPropagation();
     if(isComposingKey(e)) return;
-    if(e.key==='Escape'){ e.preventDefault(); close(); }
+    if(e.key==='Escape'){
+      e.preventDefault();
+      // First Escape while maximized restores the dragged size; the next closes.
+      if(popup.classList.contains('np-max')){ npMaxSet(false); return; }
+      close();
+    }
     if(_ro) return;
     if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); save(); }
     // Backspace onto a formula reopens its source rather than deleting it whole.
@@ -8854,9 +9113,9 @@ async function restoreVersion(mapId, ref){
   const restored=normalizeLoadedMap(data);
   restored.id=mapId;                 // keep identity
   restored.updated=Date.now();
-  // A restore brings back content, not the map's place in the world: its pin and
-  // the room it is published to stay as they are now.
-  if(cur && cur.id===mapId){ for(const k of ['pinned','_shareRoom','_editToken']) if(cur[k]!=null) restored[k]=cur[k]; }
+  // A restore brings back content, not the map's place in the world: its pin,
+  // folder and the room it is published to stay as they are now.
+  if(cur && cur.id===mapId){ for(const k of ['pinned','folder','_shareRoom','_editToken']) if(cur[k]!=null) restored[k]=cur[k]; }
   map=restored;
   $('#mapTitle').value=map.title;
   history=[]; hpos=-1; pushHistory();   // restored state becomes a fresh undo baseline
@@ -8873,7 +9132,7 @@ function normalizeLoadedMap(m){
            nodes:m.nodes||{}, links:m.links||[], vars:m.vars||{} };
   // Per-map settings are content too: a version restored without them came back
   // with default spacing, style, look and colours.
-  for(const k of ['themeSize','layoutPreset','layoutParams','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter']) if(m[k]!=null) out[k]=m[k];
+  for(const k of ['themeSize','layoutPreset','layoutParams','layoutConfig','styleConfig','lookConfig','themeConfig','frontmatter','folder']) if(m[k]!=null) out[k]=m[k];
   return sanitizeMapData(out);
 }
 // ---- Map ingress ------------------------------------------------------------
@@ -10678,6 +10937,48 @@ function notesToMdBlocks(notesHtml){
     else { htmlToInlineMd(ch.innerHTML).split('\n').forEach(l=>{ if(l.trim()) blocks.push({q:l.trim()}); }); }
   });
   return blocks;
+}
+// Notes editor Markdown source view. notesToMdBlocks above is shaped for
+// buildMarkdown's "> " blockquotes (no heading level, lists kept as HTML), so
+// this walks the same template itself and emits real Markdown that
+// notesMdToHtml() can read back through mdToHtml().
+function notesHtmlToMd(html){
+  const tpl=document.createElement('template'); tpl.innerHTML=html||'';
+  const blocks=[];
+  tpl.content.childNodes.forEach(ch=>{
+    if(ch.nodeType===3){ const lines=ch.nodeValue.split('\n').map(s=>s.trim()).filter(Boolean); if(lines.length) blocks.push(lines.join('\n')); return; }
+    if(ch.nodeType!==1) return;
+    const tag=ch.tagName.toLowerCase();
+    if(tag==='pre'){ blocks.push('```\n'+ch.textContent.replace(/\n+$/,'')+'\n```'); return; }
+    if(tag==='table'){ blocks.push(_htmlTableToMdRows(ch).join('\n')); return; }
+    const md=htmlToInlineMd(ch.innerHTML).split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!md.length) return;
+    if(/^h[1-6]$/.test(tag)){ blocks.push(md.map(l=>'#'.repeat(+tag[1])+' '+l).join('\n')); return; }
+    if(tag==='ul'||tag==='ol'){
+      const items=[]; let i=0;
+      [...ch.children].forEach(li=>{
+        if(!li.tagName||li.tagName.toLowerCase()!=='li') return;
+        const lines=htmlToInlineMd(li.innerHTML).split('\n').map(s=>s.trim()).filter(Boolean);
+        if(!lines.length) return;
+        items.push((tag==='ol'? ++i+'. ' : '- ')+lines[0]);
+        lines.slice(1).forEach(l=>items.push('  '+l));
+      });
+      blocks.push(items.join('\n')); return;
+    }
+    if(tag==='blockquote'){ blocks.push(md.map(l=>'> '+l).join('\n')); return; }
+    blocks.push(md.join('\n'));
+  });
+  return blocks.join('\n\n');
+}
+// The way back: mdToHtml parses the Markdown blocks. Each $...$ / $$...$$
+// formula is masked behind a PUA placeholder for the trip - mdToHtml would
+// otherwise render it straight to MathML, which sanitizeNotes strips with its
+// contents - and restored as escaped $ source text, which npRenderAll() turns
+// back into a live span exactly as on a fresh open.
+function notesMdToHtml(md){
+  const slots=[];
+  const masked=String(md||'').replace(new RegExp(MATH_DELIM_RE.source,'g'),(full,dd,inl)=>{ slots.push(full); return '\uE000'+(slots.length-1)+'\uE001'; });
+  return sanitizeNotes(mdToHtml(masked).replace(/\uE000(\d+)\uE001/g,(m,idx)=>slots[+idx]!=null?escapeHtml(slots[+idx]):''));
 }
 // A node's text reduced to what a person would call "the same line": tags and
 // entities gone, whitespace collapsed, case folded, capped. Written into the
@@ -12682,6 +12983,75 @@ let toastT;function toast(msg){const t=$('#toast');t.textContent=msg;t.classList
    WIRE UP
    ============================================================ */
 $('#newMap').onclick=createMap;
+// Sidebar folders: the small "＋" beside the "Your maps" label registers a
+// folder NAME (an empty folder still shows its header). The name must be new;
+// folderNames() reads both the registry and every filed map, so the check
+// runs against the last rendered index.
+$('#newFolder').onclick=async()=>{
+  if(READONLY) return;
+  const n=prompt('New folder name');
+  if(!n || !n.trim()) return;
+  const name=n.trim();
+  if(folderNames(_listIdx).includes(name)){ toast('Folder already exists'); return; }
+  const prefs=loadFolderPrefs();
+  prefs.order.push(name);
+  saveFolderPrefs(prefs);
+  refreshList();
+};
+/* ------------------------------------------------------------
+   Drag a map row onto a folder header to file it; drop it on the bare
+   list (outside any header) to unfile it back to the top level.
+
+   Note these use the HTML5 drag events (dragstart/dragover/drop), which
+   are a completely separate channel from the mousedown/mousemove dragging
+   used to reparent nodes - so sidebar filing and node dragging cannot
+   interfere with each other (the file-drop channel makes the same split).
+
+   One delegated listener set on #mapList instead of a listener per row:
+   the list re-renders on every title keystroke (the #mapTitle input
+   handler refreshes it) and per-row listeners would be rebuilt each
+   time. draggable is still set on each row as it is built; shared rows
+   carry no id and cannot be filed at all.
+   ------------------------------------------------------------ */
+(function(){
+  const list=$('#mapList'); if(!list) return;
+  list.addEventListener('dragstart',ev=>{
+    const row=ev.target.closest('.map-item');
+    if(!row || !row.dataset.id || READONLY) return;
+    ev.dataTransfer.setData('text/plain', row.dataset.id);
+    ev.dataTransfer.effectAllowed='move';
+    row.classList.add('dragging');
+  });
+  list.addEventListener('dragend',ev=>{
+    const row=ev.target.closest('.map-item');
+    if(row) row.classList.remove('dragging');
+  });
+  list.addEventListener('dragover',ev=>{
+    ev.preventDefault();   // the bare list is itself an unfile target
+    ev.dataTransfer.dropEffect='move';
+    const row=ev.target.closest('.folder-row');
+    if(row) row.classList.add('drop-ok');
+  });
+  list.addEventListener('dragleave',ev=>{
+    const row=ev.target.closest('.folder-row');
+    if(row && !row.contains(ev.relatedTarget)) row.classList.remove('drop-ok');
+  });
+  list.addEventListener('drop',ev=>{
+    ev.preventDefault();
+    // Inside a folder header the header wins - the delegated stand-in for the
+    // per-row stopPropagation; anywhere else the list unfiles the map.
+    const row=ev.target.closest('.folder-row');
+    if(row){
+      row.classList.remove('drop-ok');
+      const id=ev.dataTransfer.getData('text/plain');
+      if(id && !READONLY) setMapFolder(id, row.dataset.folder||null);
+      return;
+    }
+    if(READONLY) return;
+    const id=ev.dataTransfer.getData('text/plain');
+    if(id) setMapFolder(id, null);
+  });
+})();
 $('#emptyNew').onclick=createMap;
 $('#addChild').onclick=()=>{ if(!map)return; addNode(sel||map.rootId,false); };
 // Before printing, fit the whole map into view so nothing is clipped on paper.
@@ -16428,6 +16798,7 @@ const PREFS = [
   { key:'mindspark:custom-theme',      kind:'content',   section:'My content', label:'Custom theme',      show:v=>{ try{ return JSON.parse(v).name; }catch(e){ return '(unreadable)'; } } },
   { key:'mindspark:layouts',           kind:'content',   section:'My content', label:'Custom layouts',    show:v=>{ try{ return JSON.parse(v).map(l=>l.name).join(', '); }catch(e){ return '(unreadable)'; } } },
   { key:'mindspark:userTemplates',     kind:'content',   section:'My content', label:'Saved templates',   show:v=>{ try{ return JSON.parse(v).map(t=>t.name).join(', '); }catch(e){ return '(unreadable)'; } } },
+  { key:'mindspark:folders',           kind:'content',   section:'My content', label:'Map folders',       show:v=>{ try{ return JSON.parse(v).order.join(', '); }catch(e){ return '(unreadable)'; } } },
   // Caches - never edited, only counted; "Clear everything" removes them
   { prefix:'mindspark:backup:',        kind:'cache',     section:'Storage',    label:'Local map backups' },
   { prefix:'mindspark:view:',          kind:'cache',     section:'Storage',    label:'Remembered camera positions' },
@@ -16435,6 +16806,7 @@ const PREFS = [
   { prefix:'mindspark:gh-stars:',      kind:'cache',     section:'Storage',    label:'GitHub star counts' },
   { key:'mindspark:demoSeeded',        kind:'cache',     section:'Storage',    label:'Demo map seeded' },
   { key:'mindspark:bp:geom',           kind:'cache',     section:'Storage',    label:'Build Prompt panel position' },
+  { key:'mindspark:notesSize',         kind:'cache',     section:'Storage',    label:'Notes popup size' },
   // Transient - a nonce between opening a popup and its return
   { key:'mindspark:oauth:state',       kind:'transient' },
   { key:'mindspark:forge:oauthstate',  kind:'transient' },

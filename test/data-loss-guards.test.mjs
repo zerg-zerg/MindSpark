@@ -51,9 +51,9 @@ describe('version history', () => {
     assert.equal(timers.length, 0, 'nothing is scheduled for the preview');
   });
 
-  test('restore keeps the pin and the share binding of the current map', () => {
+  test('restore keeps the pin, folder and share binding of the current map', () => {
     const body = fn('restoreVersion');
-    assert.match(body, /\['pinned','_shareRoom','_editToken'\]/);
+    assert.match(body, /\['pinned','folder','_shareRoom','_editToken'\]/);
     assert.match(body, /endHistoryPreview\(false\)/);
     assert.doesNotMatch(body, /await Store\.save\(map\)/, 'saves go through the one runner');
   });

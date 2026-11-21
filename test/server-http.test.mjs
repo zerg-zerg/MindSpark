@@ -268,3 +268,126 @@ describe('self-hosted server - version history', () => {
     assert.equal(await versions('vh2'), 3);
   });
 });
+
+// The sidebar's folders. A map's folder is stored twice by design: inside the
+// map JSON (so it travels with exports and versions) and in a `maps.folder`
+// column (so the list can group without downloading every map). These tests
+// spawn their own server with a seeded administrator, because the maps API is
+// owner-scoped and answers only to a signed-in user.
+describe('self-hosted server - folders', () => {
+  let p3, base3, dir3, cookie;
+  before(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'mindspark-folders-'));
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    base3 = `http://127.0.0.1:${port}`;
+    p3 = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'server.js')], {
+      env: { ...process.env, PORT: String(port), DB_PATH: join(dir3, 'test.db'), ADMIN_USER: 'admin', ADMIN_PASSWORD: 'folders-test-123' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await waitFor(base3 + '/healthz');
+    const r = await fetch(base3 + '/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'folders-test-123' }),
+    });
+    assert.equal(r.status, 200, 'the seeded administrator signs in');
+    cookie = r.headers.get('set-cookie').split(';')[0];
+  });
+  after(async () => {
+    if (p3) { p3.kill(); await new Promise(r => p3.once('exit', r)); }
+    try { rmSync(dir3, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  test('a map filed into a folder lists and reads back with it', async () => {
+    const m = { title: 'Filed', color: '#3a6ea5', folder: 'Work', rootId: 'r', nodes: { r: { id: 'r', text: 'R', parent: null } }, links: [] };
+    assert.equal((await fetch(base3 + '/api/maps/f1', { method: 'PUT', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(m) })).status, 200);
+    const list = await (await fetch(base3 + '/api/maps', { headers: { cookie } })).json();
+    const row = list.find(x => x.id === 'f1');
+    assert.ok(row, 'the map is listed');
+    assert.equal(row.folder, 'Work');
+    const got = await (await fetch(base3 + '/api/maps/f1', { headers: { cookie } })).json();
+    assert.equal(got.folder, 'Work', 'GET returns folder inside the map data');
+  });
+
+  test('PUT without a folder takes the column back to NULL and drops the key', async () => {
+    const m = { title: 'Unfiled', color: '#3a6ea5', rootId: 'r', nodes: { r: { id: 'r', text: 'R', parent: null } }, links: [] };
+    assert.equal((await fetch(base3 + '/api/maps/f1', { method: 'PUT', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(m) })).status, 200);
+    const list = await (await fetch(base3 + '/api/maps', { headers: { cookie } })).json();
+    assert.equal(list.find(x => x.id === 'f1').folder, null, 'no empty string lingers in the column');
+    const got = await (await fetch(base3 + '/api/maps/f1', { headers: { cookie } })).json();
+    assert.ok(!('folder' in got), 'unfiling deleted the key from the data, it did not write ""');
+  });
+});
+
+// A database written before the folder column existed must keep serving: boot
+// adds the column and backfills it from map JSON that already carried a folder
+// (a newer client once saved against an older server), and the old rows read
+// exactly as before. The pre-folder database is built in-process with the same
+// node:sqlite the server itself uses, then the server is booted on top of it.
+describe('self-hosted server - folder column migration', () => {
+  let p4, base4, dir4, cookie;
+  before(async () => {
+    dir4 = mkdtempSync(join(tmpdir(), 'mindspark-migrate-'));
+    const { DatabaseSync } = await import('node:sqlite');
+    const crypto = await import('node:crypto');
+    const legacy = new DatabaseSync(join(dir4, 'test.db'));
+    // Same scrypt format the server stores, so the seeded user can sign in.
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync('folders-test-123', salt, 64).toString('hex');
+    const uid = crypto.randomUUID();
+    legacy.exec(`CREATE TABLE users (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user', created INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0)`);
+    legacy.prepare('INSERT INTO users (id,username,password_hash,role,created) VALUES (?,?,?,\'admin\',?)')
+      .run(uid, 'admin', `scrypt$${salt}$${hash}`, Date.now());
+    legacy.exec(`CREATE TABLE maps (
+      owner_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'Untitled map',
+      color TEXT, data TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (owner_id, id))`);
+    // One row with a folder only inside its JSON (the backfill case), one plain.
+    legacy.prepare('INSERT INTO maps (owner_id,id,title,color,data,updated) VALUES (?,?,?,?,?,?)').run(
+      uid, 'old1', 'Legacy map', '#3a6ea5',
+      JSON.stringify({ id: 'old1', title: 'Legacy map', color: '#3a6ea5', rootId: 'r', nodes: { r: { id: 'r', text: 'R', parent: null } }, links: [], folder: 'Legacy' }),
+      Date.now());
+    legacy.prepare('INSERT INTO maps (owner_id,id,title,color,data,updated) VALUES (?,?,?,?,?,?)').run(
+      uid, 'old2', 'Plain legacy', null,
+      JSON.stringify({ id: 'old2', title: 'Plain legacy', rootId: 'r', nodes: { r: { id: 'r', text: 'R', parent: null } }, links: [] }),
+      Date.now());
+    legacy.close();
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    base4 = `http://127.0.0.1:${port}`;
+    p4 = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'server.js')], {
+      env: { ...process.env, PORT: String(port), DB_PATH: join(dir4, 'test.db'), ADMIN_USER: 'admin', ADMIN_PASSWORD: 'folders-test-123' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await waitFor(base4 + '/healthz');
+    const r = await fetch(base4 + '/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'folders-test-123' }),
+    });
+    assert.equal(r.status, 200, 'the seeded legacy user still signs in');
+    cookie = r.headers.get('set-cookie').split(';')[0];
+  });
+  after(async () => {
+    if (p4) { p4.kill(); await new Promise(r => p4.once('exit', r)); }
+    try { rmSync(dir4, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  test('boot adds the column and backfills it from the map JSON', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(dir4, 'test.db'));
+    try {
+      const cols = db.prepare('PRAGMA table_info(maps)').all().map(c => c.name);
+      assert.ok(cols.includes('folder'), 'the folder column exists after boot');
+      assert.equal(db.prepare('SELECT folder FROM maps WHERE id = ?').get('old1').folder, 'Legacy', 'the folder in the JSON was backfilled');
+      assert.equal(db.prepare('SELECT folder FROM maps WHERE id = ?').get('old2').folder, null, 'a plain row stays unfiled');
+    } finally { db.close(); }
+  });
+
+  test('old rows keep serving, over GET and in the list', async () => {
+    const got = await (await fetch(base4 + '/api/maps/old1', { headers: { cookie } })).json();
+    assert.equal(got.title, 'Legacy map');
+    assert.equal(got.folder, 'Legacy');
+    const list = await (await fetch(base4 + '/api/maps', { headers: { cookie } })).json();
+    assert.equal(list.find(x => x.id === 'old1').folder, 'Legacy');
+    assert.equal(list.find(x => x.id === 'old2').folder, null);
+  });
+});

@@ -355,6 +355,9 @@ export const ROOT_SURFACE = {
   '.instance-input': 'var(--node-bg)', '.vf-input': 'var(--node-bg)',
   '.row-pop button': 'var(--paper)', '.row-pop button.danger': 'var(--paper)',
   '.map-item': 'var(--node-bg)',
+  // A folder header row paints nothing at rest; it sits in .side-scroll on
+  // .side, which paints --chrome (:1100), like .side-label below it.
+  '.folder-row': 'var(--chrome)',
   '.hint': 'var(--chrome)', '.statusbar': 'var(--chrome)',
   '.am-rm': 'var(--node-bg)', '.am-user': 'var(--node-bg)',
   '.bp-save': 'var(--node-bg)', '.bp-chip': 'var(--node-bg)',
